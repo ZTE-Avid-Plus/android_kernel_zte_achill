@@ -1,1 +1,3 @@
-# android_kernel_zte_achill
+# ZTE Avid Plus Kernel Source
+
+When building a ROM, use lineageos-achill_defconfig
