@@ -1,3 +1,3 @@
 # ZTE Avid Plus Kernel Source
 
-When building a ROM, use lineageos-achill_defconfig
+This is the stock kernel source, for building Android 5.1 ROMs.
