@@ -1,6 +1,7 @@
 #
 # Makefile for building the SELinux module as part of the kernel tree.
 #
+EXTRA_CFLAGS += -DCONFIG_ALWAYS_ENFORCE=false
 
 obj-$(CONFIG_SECURITY_SELINUX) := selinux.o
 
@@ -12,6 +13,12 @@ selinux-y := avc.o hooks.o selinuxfs.o netlink.o nlmsgtab.o netif.o \
 selinux-$(CONFIG_SECURITY_NETWORK_XFRM) += xfrm.o
 
 selinux-$(CONFIG_NETLABEL) += netlabel.o
+
+#
+# Preproc/postproc policy as binary image
+# by ZTE_JIA_20150319 jia.jia
+#
+selinux-$(CONFIG_SECURITY_SELINUX_POLICYPROC) += ss/policyproc.o
 
 ccflags-y := -Isecurity/selinux -Isecurity/selinux/include
 
