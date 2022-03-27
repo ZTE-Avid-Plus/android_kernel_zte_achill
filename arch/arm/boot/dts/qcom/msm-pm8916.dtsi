@@ -39,8 +39,8 @@
 				qcom,support-reset = <1>;
 				qcom,pull-up = <1>;
 				qcom,s1-timer = <10256>;
-				qcom,s2-timer = <2000>;
-				qcom,s2-type = <1>;
+				qcom,s2-timer = <100>;		/*zte change*/
+				qcom,s2-type = <0x07>;		/*zte change*/
 				linux,code = <116>;
 			};
 
@@ -139,6 +139,7 @@
 			qcom,adc-vdd-reference = <1800>;
 			qcom,vadc-poll-eoc;
 			qcom,pmic-revid = <&pm8916_revid>;
+                        qcom,vadc-recalib-check;
 
 			chan@8 {
 				label = "die_temp";
@@ -218,8 +219,8 @@
 			qcom,warm-bat-mv = <4100>;
 			qcom,ibatmax-warm-ma = <360>;
 			qcom,ibatmax-cool-ma = <360>;
-			qcom,batt-hot-percentage = <25>;
-			qcom,batt-cold-percentage = <80>;
+			qcom,batt-hot-percentage = <35>;  /*0-45 DegC for for p890a12/13*/
+			qcom,batt-cold-percentage = <70>; /*0-45 DegC for for p890a12/13*/
 			qcom,tchg-mins = <232>;
 			qcom,chg-vadc = <&pm8916_vadc>;
 			qcom,chg-adc_tm = <&pm8916_adc_tm>;
@@ -270,7 +271,7 @@
 
 			qcom,v-cutoff-uv = <3400000>;
 			qcom,max-voltage-uv = <4200000>;
-			qcom,r-conn-mohm = <0>;
+			qcom,r-conn-mohm = <16>;
 			qcom,shutdown-soc-valid-limit = <100>;
 			qcom,low-soc-calculate-soc-threshold = <15>;
 			qcom,low-voltage-calculate-soc-ms = <1000>;

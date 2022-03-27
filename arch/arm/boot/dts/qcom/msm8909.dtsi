@@ -94,7 +94,7 @@
 			linux,reserve-contiguous-region;
 			linux,reserve-region;
 			linux,remove-completely;
-			reg = <0x0 0x88000000 0x0 0x05500000>;
+			reg = <0x0 0x88000000 0x0 0x04e00000>;
 			label = "modem_adsp_mem";
 		};
 
@@ -102,7 +102,7 @@
 			linux,reserve-contiguous-region;
 			linux,reserve-region;
 			linux,remove-completely;
-			reg = <0x0 0x8d500000 0x0 0x0500000>;
+			reg = <0x0 0x8ce00000 0x0 0x0500000>;
 			label = "peripheral_mem";
 		};
 
@@ -125,6 +125,23 @@
 			reg = <0x0 0x83000000 0x0 0xc00000>;
 			label = "cont_splash_mem";
 		};
+
+                ram_console_reserve: ram_console_reserve_mem_region@0 {
+                        linux,reserve-contiguous-region;
+                        linux,reserve-region;
+                        linux,remove-completely;
+                        reg = <0x0 0x8FF00000 0x0 0xFC000>;
+                        label = "ram_console_reserve";
+                };
+
+                rpmb_secure_channel_reserve: rpmb_secure_channel_reserve_mem_region@0 {
+                        linux,reserve-contiguous-region;
+                        linux,reserve-region;
+                        linux,remove-completely;
+                        reg = <0x0 0x8FFFC000 0x0 0x4000>;
+                        label = "rpmb_secure_channel_reserve";
+                };
+
 	};
 
 	soc: soc { };
@@ -655,6 +672,7 @@
 		qcom,rx-ring-size = <32>;
 		qcom,no-cpu-affinity;
 		qcom,max-rx-mtu = <4096>;
+		qcom,fast-shutdown;
 	};
 
 	qcom,smdtty {
@@ -1088,6 +1106,30 @@
 		mem_dump_table@10 {
 			compatible = "qcom,msm-imem-mem_dump_table";
 			reg = <0x10 8>;
+		};
+		pm_count_time@30 {
+            compatible = "qcom,msm-imem-pm-count-time";
+            reg = <0x30 24>;
+        };
+
+                golden_copy@28 {
+                        compatible = "qcom,msm-imem-efs-golden-copy";
+                        reg = <0x28 8>;
+                };
+
+		sd_dump_mode@4c {
+			compatible = "qcom,msm-imem-sd_dump_mode";
+			reg = <0x4c 4>;
+		};
+		
+		sdlog_mem_phys_addr@68 {
+			compatible = "qcom,msm-imem-sdlog_mem_phys_addr";
+			reg = <0x68 4>;
+		};
+
+		sdlog_mem_size@6c {
+			compatible = "qcom,msm-imem-sdlog_mem_size";
+			reg = <0x6c 4>;
 		};
 
 		boot_stats@6b0 {
@@ -1771,3 +1813,4 @@
 	status = "okay";
 };
 
+#include "zte-f3mem.dtsi"
