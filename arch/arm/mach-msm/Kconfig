@@ -112,6 +112,7 @@ config ARCH_MSM8909
 	select MSM_BIMC_BWMON
 	select MSM_JTAG_MM if CORESIGHT_ETM
 	select RCU_BOOST if DEBUG_KMEMLEAK
+	select ZTE_BOOT_MODE
 
 config ARCH_MSM8916
 	bool "MSM8916"
@@ -415,6 +416,45 @@ config MSM_REMOTE_SPINLOCK_LDREX
 	bool
 config MSM_REMOTE_SPINLOCK_SFPB
 	bool
+
+config ZTE_BOOT_MODE
+        depends on ARCH_MSM8909
+        bool "ZTE BOOT MODE"
+        default n
+        help
+          Support for boot mode
+
+menu "MSM Board Selection"
+
+config BOARD_LAVENDER
+    depends on ARCH_MSM8909
+    select ZTE_BOARD_ID
+    bool "ZTE LAVENDER"
+    help
+      Support for ZTE MSM8909 LAVENDER device.
+
+config BOARD_ABBY
+    depends on ARCH_MSM8909
+    select ZTE_BOARD_ID
+    bool "ZTE ABBY"
+    help
+      Support for ZTE MSM8909 ABBY device.
+
+config BOARD_BAFFIN
+    depends on ARCH_MSM8909
+    select ZTE_BOARD_ID
+    bool "ZTE BAFFIN"
+    help
+      Support for ZTE MSM8909 BAFFIN device.
+
+config BOARD_ACHILL
+    depends on ARCH_MSM8909
+    select ZTE_BOARD_ID
+    bool "ZTE ACHILL"
+    help
+      Support for ZTE MSM8909 ACHILL device.
+
+endmenu
 
 config MSM_STACKED_MEMORY
 	bool "Stacked Memory"
@@ -1023,6 +1063,21 @@ config MSM_UARTDM_Core_v14
 	depends on SERIAL_MSM_HS
 	help
 		Select if BLSP based UART Core v.14 or higher is present.
+
+config ZTE_BOARD_ID
+        depends on ARCH_MSM8909
+        bool "ZTE BOARD ID"
+        default n
+        help
+          Support for reading board ID.
+
+config ZTE_PIL_AUTH_ERROR_DETECTION
+	depends on ARCH_MSM8909
+	bool "PIL AUTH ERROR DETECTION"
+	default n
+	help
+	  When authorization of PIL images is failed, the system
+	  will enter into UNAUTH mode to show related error message.
 
 config KRAIT_REGULATOR
 	bool "Support Kraits powered via ganged regulators in the pmic"

@@ -60,6 +60,7 @@
 
 #include "atags.h"
 
+int offcharging_flag=0;		//zte add
 
 #if defined(CONFIG_FPE_NWFPE) || defined(CONFIG_FPE_FASTFPE)
 char fpe_type[8];
@@ -78,6 +79,7 @@ extern void sanity_check_meminfo(void);
 extern enum reboot_mode reboot_mode;
 extern void setup_dma_zone(const struct machine_desc *desc);
 
+int emmc_version_5_0 =0;  //yeganlin_20150122
 unsigned int processor_id;
 EXPORT_SYMBOL(processor_id);
 unsigned int __machine_arch_type __read_mostly;
@@ -867,7 +869,20 @@ void __init setup_arch(char **cmdline_p)
 	/* populate cmd_line too for later use, preserving boot_command_line */
 	strlcpy(cmd_line, boot_command_line, COMMAND_LINE_SIZE);
 	*cmdline_p = cmd_line;
+    //zte PM add
+    if (strstr(boot_command_line, "androidboot.mode=charger"))
+    {
+		offcharging_flag = 1;
+		printk("ZTE :boot mode is offcharging/charger \n"); //ZTE
+    }
+    //zte PM add, end
 
+//yeganlin_20150122,get emmc_hynix_version from cmdline if it is Hynix and V5.0
+    if (strstr(boot_command_line, "emmc.hynix.verison=7"))
+    {
+               emmc_version_5_0 = 1;
+               pr_err("ZTE :emmc hynix version is 5.0\n");
+    }
 	parse_early_param();
 
 	/* XXX argh */
