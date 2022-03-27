@@ -1515,8 +1515,6 @@ static int smb135x_battery_set_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CHARGING_ENABLED:
 		smb135x_charging(chip, val->intval);
-		power_supply_set_online(chip->usb_psy,
-				val->intval && chip->usb_present);
 		break;
 	case POWER_SUPPLY_PROP_CAPACITY:
 		chip->fake_battery_soc = val->intval;
@@ -1970,14 +1968,21 @@ static void smb135x_external_power_changed(struct power_supply *psy)
 
 	rc = chip->usb_psy->get_property(chip->usb_psy,
 			POWER_SUPPLY_PROP_ONLINE, &prop);
-	if (rc < 0) {
+	if (rc < 0)
 		dev_err(chip->dev,
 			"could not read USB ONLINE property, rc=%d\n", rc);
+
+	/* update online property */
+	rc = 0;
+	if (chip->usb_present && chip->chg_enabled && chip->usb_psy_ma != 0) {
+		if (prop.intval == 0)
+			rc = power_supply_set_online(chip->usb_psy, true);
 	} else {
-		/* reset online property if charging is not enabled */
-		if (prop.intval && !chip->chg_enabled)
-			power_supply_set_online(chip->usb_psy, false);
+		if (prop.intval == 1)
+			rc = power_supply_set_online(chip->usb_psy, false);
 	}
+	if (rc < 0)
+		dev_err(chip->dev, "could not set usb online, rc=%d\n", rc);
 }
 
 static bool elapsed_msec_greater(struct timeval *start_time,
@@ -2568,10 +2573,6 @@ static int handle_usb_removal(struct smb135x_chg *chip)
 				POWER_SUPPLY_TYPE_UNKNOWN);
 		pr_debug("setting usb psy present = %d\n", chip->usb_present);
 		power_supply_set_present(chip->usb_psy, chip->usb_present);
-		if (chip->chg_enabled) {
-			pr_debug("setting usb psy online to false\n");
-			power_supply_set_online(chip->usb_psy, false);
-		}
 	}
 	return 0;
 }
@@ -2613,10 +2614,6 @@ static int handle_usb_insertion(struct smb135x_chg *chip)
 		power_supply_set_supply_type(chip->usb_psy, usb_supply_type);
 		pr_debug("setting usb psy present = %d\n", chip->usb_present);
 		power_supply_set_present(chip->usb_psy, chip->usb_present);
-		if (chip->chg_enabled) {
-			pr_debug("setting usb psy online to true\n");
-			power_supply_set_online(chip->usb_psy, true);
-		}
 	}
 	return 0;
 }
@@ -3243,10 +3240,6 @@ static void dump_regs(struct smb135x_chg *chip)
 {
 }
 #endif
-
-#define UPDATE_IRQ_STAT(irq_reg, value) \
-		handlers[irq_reg - IRQ_A_REG].prev_val = value
-
 static int determine_initial_status(struct smb135x_chg *chip)
 {
 	int rc;
@@ -3265,8 +3258,6 @@ static int determine_initial_status(struct smb135x_chg *chip)
 		dev_err(chip->dev, "Couldn't read irq b rc = %d\n", rc);
 		return rc;
 	}
-	UPDATE_IRQ_STAT(IRQ_B_REG, reg);
-
 	if (reg & IRQ_B_BATT_TERMINAL_BIT || reg & IRQ_B_BATT_MISSING_BIT)
 		chip->batt_present = false;
 	rc = smb135x_read(chip, STATUS_4_REG, &reg);
@@ -3283,7 +3274,6 @@ static int determine_initial_status(struct smb135x_chg *chip)
 		dev_err(chip->dev, "Couldn't read irq A rc = %d\n", rc);
 		return rc;
 	}
-	UPDATE_IRQ_STAT(IRQ_A_REG, reg);
 
 	if (reg & IRQ_A_HOT_HARD_BIT)
 		chip->batt_hot = true;
@@ -3299,7 +3289,6 @@ static int determine_initial_status(struct smb135x_chg *chip)
 		dev_err(chip->dev, "Couldn't read irq A rc = %d\n", rc);
 		return rc;
 	}
-	UPDATE_IRQ_STAT(IRQ_C_REG, reg);
 	if (reg & IRQ_C_TERM_BIT)
 		chip->chg_done_batt_full = true;
 
@@ -3308,7 +3297,6 @@ static int determine_initial_status(struct smb135x_chg *chip)
 		dev_err(chip->dev, "Couldn't read irq E rc = %d\n", rc);
 		return rc;
 	}
-	UPDATE_IRQ_STAT(IRQ_E_REG, reg);
 	chip->usb_uv = !!(reg & IRQ_E_USB_UV_BIT);
 	chip->usb_present = !(reg & IRQ_E_USB_OV_BIT)
 				&& !(reg & IRQ_E_USB_UV_BIT);
@@ -3340,28 +3328,6 @@ static int determine_initial_status(struct smb135x_chg *chip)
 		power_supply_set_usb_otg(chip->usb_psy,
 			chip->usb_slave_present);
 	}
-
-	rc = smb135x_read(chip, IRQ_D_REG, &reg);
-	if (rc < 0) {
-		dev_err(chip->dev, "Couldn't read irq D rc = %d\n", rc);
-		return rc;
-	}
-	UPDATE_IRQ_STAT(IRQ_D_REG, reg);
-
-	rc = smb135x_read(chip, IRQ_F_REG, &reg);
-	if (rc < 0) {
-		dev_err(chip->dev, "Couldn't read irq F rc = %d\n", rc);
-		return rc;
-	}
-	UPDATE_IRQ_STAT(IRQ_F_REG, reg);
-
-	rc = smb135x_read(chip, IRQ_G_REG, &reg);
-	if (rc < 0) {
-		dev_err(chip->dev, "Couldn't read irq G rc = %d\n", rc);
-		return rc;
-	}
-	UPDATE_IRQ_STAT(IRQ_G_REG, reg);
-
 	return 0;
 }
 

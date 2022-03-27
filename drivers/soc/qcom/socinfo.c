@@ -32,6 +32,7 @@
 #include <soc/qcom/socinfo.h>
 #include <soc/qcom/smem.h>
 #include <soc/qcom/boot_stats.h>
+#include <linux/of_address.h>
 
 #define BUILD_ID_LENGTH 32
 #define SMEM_IMAGE_VERSION_BLOCKS_COUNT 32
@@ -119,6 +120,13 @@ const char *hw_platform_subtype[] = {
 	[PLATFORM_SUBTYPE_STRANGE] = "strange",
 	[PLATFORM_SUBTYPE_STRANGE_2A] = "strange_2a,"
 };
+
+typedef struct {
+        uint32_t backup_state;
+        uint32_t recovery_state;
+} efs_goden_copy;
+
+efs_goden_copy  *golden_copy_addr = NULL;
 
 /* Used to parse shared memory.  Must match the modem. */
 struct socinfo_v1 {
@@ -983,6 +991,77 @@ static struct device_attribute select_image =
 	__ATTR(select_image, S_IRUGO | S_IWUSR,
 			msm_get_image_number, msm_select_image);
 
+static char *socinfo_zte_hw_ver = NULL;
+
+void socinfo_set_hw_ver(char *ver)
+{
+	socinfo_zte_hw_ver = ver;
+}
+
+static ssize_t socinfo_show_zte_hw_ver(struct device *dev,
+				       struct device_attribute *attr,
+				       char *buf)
+{
+	if (!socinfo_zte_hw_ver)
+		return snprintf(buf, PAGE_SIZE, "%s\n", "INVALID Hardware version");
+
+	return snprintf(buf, PAGE_SIZE, "%s\n", socinfo_zte_hw_ver);
+}
+
+/*
+ * Defined for op in
+ * '/sys/devices/soc0/zte_hw_ver'
+ */
+static struct device_attribute zte_hw_ver =
+	__ATTR(zte_hw_ver, S_IRUGO, socinfo_show_zte_hw_ver, NULL);
+
+static ssize_t store_efs_recovery(struct device *dev,
+				  struct device_attribute *attr,
+				  const char *buf, size_t buf_sz)
+{
+	uint32_t efs_recovery_enable;
+	
+        pr_info("%s: e\n", __func__);	
+
+	if(!golden_copy_addr)
+		return -EFAULT;
+	
+        sscanf(buf, "%d", &(efs_recovery_enable));
+
+	pr_info("%s: efs_recovery_enable: %d\n", __func__, efs_recovery_enable);
+        	
+	if(efs_recovery_enable)
+	{
+		golden_copy_addr->recovery_state = 0x01;//efs recovery start
+	}
+	else
+	{
+		golden_copy_addr->recovery_state = 0x00;
+	}
+	mb();
+	
+	pr_info("%s: x\n", __func__);	
+
+	return buf_sz;
+}
+
+static ssize_t show_efs_recovery(struct device *dev, struct device_attribute *attr, char *buf)
+{
+        pr_info("%s: e\n", __func__);
+
+        if(!golden_copy_addr)
+                return -EFAULT;
+
+        return snprintf(buf, PAGE_SIZE, "%d\n", golden_copy_addr->recovery_state);
+}
+
+/*
+ * Defined for op in
+ * '/sys/devices/soc0/efs_recovery'
+ */
+static struct device_attribute efs_recovery =
+	__ATTR(efs_recovery, S_IRUGO | S_IWUSR, show_efs_recovery, store_efs_recovery);
+
 static void * __init setup_dummy_socinfo(void)
 {
 	if (early_machine_is_apq8084()) {
@@ -1046,6 +1125,9 @@ static void __init populate_soc_sysfs_files(struct device *msm_soc_device)
 	device_create_file(msm_soc_device, &image_crm_version);
 	device_create_file(msm_soc_device, &select_image);
 
+	device_create_file(msm_soc_device, &zte_hw_ver);
+	device_create_file(msm_soc_device, &efs_recovery);
+
 	switch (legacy_format) {
 	case 10:
 	case 9:
@@ -1102,6 +1184,26 @@ static void  __init soc_info_populate(struct soc_device_attribute *soc_dev_attr)
 
 }
 
+static void __init socinfo_init_efs_recovery(void) 
+{
+        struct device_node *np;
+
+        pr_info("%s: e\n", __func__);
+        
+        np = of_find_compatible_node(NULL, NULL, "qcom,msm-imem-efs-golden-copy");
+        if (!np) {
+                pr_err("unable to find DT imem golden copy node\n");
+        } else {
+                golden_copy_addr =(efs_goden_copy  *)of_iomap(np, 0);
+                if (!golden_copy_addr)
+                        pr_err("unable to map imem golden copyoffset\n");
+        }
+
+        pr_err("%s: 0x%p\n", __func__, golden_copy_addr);
+
+	return;
+}
+
 static int __init socinfo_init_sysfs(void)
 {
 	struct device *msm_soc_device;
@@ -1128,6 +1230,9 @@ static int __init socinfo_init_sysfs(void)
 	}
 
 	msm_soc_device = soc_device_to_device(soc_dev);
+
+	socinfo_init_efs_recovery();
+
 	populate_soc_sysfs_files(msm_soc_device);
 	return 0;
 }
@@ -1432,3 +1537,38 @@ const int cpu_is_krait_v3(void)
 		return 0;
 	};
 }
+
+/*
+ * Support for FTM & RECOVERY mode by ZTE_BOOT_JIA_20130107, jia.jia
+ */
+#ifdef CONFIG_ZTE_BOOT_MODE
+static int ftm_flag = 0;
+static int check_flag = 0x12345678;
+
+void socinfo_set_ftm_flag(int val)
+{
+	ftm_flag = val;
+}
+
+int socinfo_get_ftm_flag(void)
+{
+    return ftm_flag;
+}
+
+int socinfo_get_check_flag(void)
+{
+    return check_flag;
+}
+
+static int recovery_flag = 0;
+
+void socinfo_set_recovery_flag(int val)
+{
+	recovery_flag = val;
+}
+
+int socinfo_get_recovery_flag(void)
+{
+    return recovery_flag;
+}
+#endif

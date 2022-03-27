@@ -22,6 +22,7 @@
 #include <linux/sched.h>
 #include <linux/of.h>
 #include <linux/of_address.h>
+#include <soc/qcom/socinfo.h>
 
 struct boot_stats {
 	uint32_t bootloader_start;
@@ -104,3 +105,55 @@ int boot_stats_init(void)
 	return 0;
 }
 
+/*
+ * Support for FTM & RECOVERY mode by ZTE_BOOT_RXZ_20131018 ruan.xianzhang
+ */
+#ifdef CONFIG_ZTE_BOOT_MODE
+#define SOCINFO_CMDLINE_BOOTMODE          "androidboot.mode="
+#define SOCINFO_CMDLINE_BOOTMODE_NORMAL   "normal"
+#define SOCINFO_CMDLINE_BOOTMODE_FTM      "ftm"
+#define SOCINFO_CMDLINE_BOOTMODE_RECOVERY "recovery"
+
+static int __init bootmode_init(char *mode)
+{
+	int is_boot_into_ftm = 0;
+	int is_boot_into_recovery = 0;
+
+	if (!strncmp(mode, SOCINFO_CMDLINE_BOOTMODE_NORMAL, strlen(SOCINFO_CMDLINE_BOOTMODE_NORMAL)))
+	{
+		is_boot_into_ftm = 0;
+		is_boot_into_recovery = 0;
+	}
+	else if (!strncmp(mode, SOCINFO_CMDLINE_BOOTMODE_FTM, strlen(SOCINFO_CMDLINE_BOOTMODE_FTM)))
+	{
+		is_boot_into_ftm = 1;
+		is_boot_into_recovery = 0;
+	}
+	else if (!strncmp(mode, SOCINFO_CMDLINE_BOOTMODE_RECOVERY, strlen(SOCINFO_CMDLINE_BOOTMODE_RECOVERY)))
+	{
+		is_boot_into_ftm = 0;
+		is_boot_into_recovery = 1;
+	}
+	else
+	{
+		is_boot_into_ftm = 0;
+		is_boot_into_recovery = 0;
+	}
+
+	socinfo_set_ftm_flag(is_boot_into_ftm);
+	socinfo_set_recovery_flag(is_boot_into_recovery);
+
+	return 1;
+}
+
+__setup(SOCINFO_CMDLINE_BOOTMODE, bootmode_init);
+#endif /* CONFIG_ZTE_BOOT_MODE */
+
+static int __init zte_hw_ver_init(char *ver)
+{
+	socinfo_set_hw_ver(ver);
+	return 0;
+}
+
+#define SOCINFO_CMDLINE_HW_VER "androidboot.hw_ver="
+__setup(SOCINFO_CMDLINE_HW_VER, zte_hw_ver_init);

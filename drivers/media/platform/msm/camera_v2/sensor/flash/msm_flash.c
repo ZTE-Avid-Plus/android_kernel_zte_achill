@@ -1040,7 +1040,7 @@ static struct platform_driver msm_flash_platform_driver = {
 static int __init msm_flash_init_module(void)
 {
 	int32_t rc = 0;
-	CDBG("Enter\n");
+	pr_err("Enter\n");
 	rc = platform_driver_register(&msm_flash_platform_driver);
 	if (rc)
 		pr_err("platform probe for flash failed");

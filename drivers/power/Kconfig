@@ -543,6 +543,29 @@ config MSM_BCL_PERIPHERAL_CTL
 	  provides routines to configure and monitor the BCL
 	  PMIC peripheral.
 
+config TI24x9x_CHARGER
+	tristate "TI 24x9x Charger"
+	depends on I2C
+	help
+	  Say Y to include support for TI 24x9x Charger.
+
+config TI27520_BMS
+	tristate "TI bq27520 BMS"
+	depends on I2C
+	help
+	  Say Y to include support for TI bq27520 BMS.
+
+config LC709203F_FG
+	tristate "lc709203f_fg"
+	depends on I2C
+	help
+	  Say Y to include support for lc709203f_fg.
+
+config ZTE_HALL_AVAILABLE	
+       	tristate "Hall available"
+	help
+	  Support Hall sensor for ZTE devices	
+
 source "drivers/power/reset/Kconfig"
 
 endif # POWER_SUPPLY

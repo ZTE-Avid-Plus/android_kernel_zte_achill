@@ -9,7 +9,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
  */
-
+#define DEBUG
 #define pr_fmt(fmt) "SMB358 %s: " fmt, __func__
 #include <linux/i2c.h>
 #include <linux/debugfs.h>
@@ -28,6 +28,13 @@
 #include <linux/of_gpio.h>
 #include <linux/mutex.h>
 #include <linux/qpnp/qpnp-adc.h>
+#include <linux/reboot.h>	/* For kernel_power_off() */
+#include <linux/wakelock.h>
+
+
+#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_DSX_I2C
+int syna_ts_notifier_call_chain(unsigned long val);
+#endif
 
 #define _SMB358_MASK(BITS, POS) \
 	((unsigned char)(((1 << (BITS)) - 1) << (POS)))
@@ -90,6 +97,9 @@
 #define CHG_CTRL_APSD_EN_MASK			BIT(2)
 #define CHG_ITERM_MASK				0x07
 #define CHG_PIN_CTRL_USBCS_REG_BIT		0x0
+#define CHG_HARD_TEMP_LIMIT_BEHAV_MASK  BIT(2)
+#define CHG_HARD_TEMP_LIMIT_BEHAV_BIT   BIT(2)
+
 /* This is to select if use external pin EN to control CHG */
 #define CHG_PIN_CTRL_CHG_EN_LOW_PIN_BIT		SMB358_MASK(6, 5)
 #define CHG_PIN_CTRL_CHG_EN_LOW_REG_BIT		0x0
@@ -258,6 +268,9 @@ struct smb358_charger {
 	int			bat_present_decidegc;
 	/* i2c pull up regulator */
 	struct regulator	*vcc_i2c;
+	struct delayed_work  update_heartbeat_work;
+	struct work_struct   poweroff_work;	        //ZTE
+
 };
 
 struct smb_irq_info {
@@ -287,6 +300,7 @@ static int fast_chg_current[] = {
 static char *pm_batt_supplied_to[] = {
 	"bms",
 };
+struct smb358_charger *the_smb358_chip =	NULL;
 
 static int __smb358_read_reg(struct smb358_charger *chip, u8 reg, u8 *val)
 {
@@ -687,6 +701,7 @@ skip:
 	return rc;
 }
 
+static int __smb358_path_suspend(struct smb358_charger *chip, bool suspend);
 static int smb358_hw_init(struct smb358_charger *chip)
 {
 	int rc;
@@ -747,13 +762,35 @@ static int smb358_hw_init(struct smb358_charger *chip)
 		return rc;
 	}
 	/* Fault and Status IRQ configuration */
-	reg = FAULT_INT_HOT_COLD_HARD_BIT | FAULT_INT_HOT_COLD_SOFT_BIT
-		| FAULT_INT_INPUT_UV_BIT | FAULT_INT_AICL_COMPLETE_BIT
-		| FAULT_INT_INPUT_OV_BIT;
-	rc = smb358_write_reg(chip, FAULT_INT_REG, reg);
-	if (rc) {
-		dev_err(chip->dev, "Couldn't set FAULT_INT_REG rc=%d\n", rc);
-		return rc;
+	/* NOTE(By zte jzn 20151027):
+	 * if using_pmic_therm,do not triger smb358 hot/cold interrupt
+	*/
+	if(chip->using_pmic_therm){
+		reg = FAULT_INT_INPUT_UV_BIT | FAULT_INT_AICL_COMPLETE_BIT
+			| FAULT_INT_INPUT_OV_BIT;
+
+		rc = smb358_write_reg(chip, FAULT_INT_REG, reg);
+		if (rc) {
+			dev_err(chip->dev, "Couldn't set FAULT_INT_REG rc=%d\n", rc);
+			return rc;
+		}
+		/*Charging is not suspended when battery temperature is outside hard limits */
+		mask = CHG_HARD_TEMP_LIMIT_BEHAV_MASK;
+		reg  = CHG_HARD_TEMP_LIMIT_BEHAV_BIT;
+		rc = smb358_masked_write(chip, SYSOK_AND_USB3_REG, mask, reg);
+		if (rc < 0)
+			dev_err(chip->dev, "Couldn't set hard temp behavior rc = %d\n", rc);
+
+	}else{
+		reg = FAULT_INT_HOT_COLD_HARD_BIT | FAULT_INT_HOT_COLD_SOFT_BIT
+			| FAULT_INT_INPUT_UV_BIT | FAULT_INT_AICL_COMPLETE_BIT
+			| FAULT_INT_INPUT_OV_BIT;
+
+		rc = smb358_write_reg(chip, FAULT_INT_REG, reg);
+		if (rc) {
+			dev_err(chip->dev, "Couldn't set FAULT_INT_REG rc=%d\n", rc);
+			return rc;
+		}
 	}
 	reg = STATUS_INT_CHG_TIMEOUT_BIT | STATUS_INT_OTG_DETECT_BIT |
 		STATUS_INT_BATT_OV_BIT | STATUS_INT_CHGING_BIT |
@@ -826,6 +863,9 @@ static int smb358_hw_init(struct smb358_charger *chip)
 	if (rc)
 		dev_err(chip->dev, "Couldn't write OTHER_CTRL_REG, rc = %d\n",
 								rc);
+	//zte add for usb suspend initialize
+	__smb358_path_suspend(chip, false);
+	chip->usb_suspended = 0;
 
 	return rc;
 }
@@ -848,7 +888,7 @@ static int smb358_get_prop_batt_status(struct smb358_charger *chip)
 	int rc;
 	u8 reg = 0;
 
-	if (chip->batt_full)
+	if (chip->batt_full && chip->chg_present)//report full only when full and chg present
 		return POWER_SUPPLY_STATUS_FULL;
 
 	rc = smb358_read_reg(chip, STATUS_C_REG, &reg);
@@ -874,9 +914,83 @@ static int smb358_get_prop_batt_present(struct smb358_charger *chip)
 	return !chip->battery_missing;
 }
 
+/*Note by ZTE PM: zero_report_check()
+* delay 40s before poweroff while soc is 0 at power on,
+* to avoid poweroff suddenly at power on
+*/
+#define ZERO_REPORT_DELAY_DELTA HZ*40*1 // 40s
+static bool zte_check_soc_report_zero(void)
+{
+    static unsigned long  report_zero_jiffies = 0;
+
+    if (report_zero_jiffies == 0) {
+        report_zero_jiffies = jiffies;
+        pr_info("start check at %ld\n", report_zero_jiffies);
+        return false;
+    } else {
+        if (time_after(jiffies,report_zero_jiffies+ZERO_REPORT_DELAY_DELTA )){
+			pr_info("[chg]check_soc_report_zero=true\n");
+            return true;
+        }
+        else{
+			pr_info("[chg]less than delta delay time,%ld\n",jiffies);
+            return false;
+        }
+    }
+}
+
+static int smb358_get_prop_battery_voltage_now(struct smb358_charger *chip);
+extern int enable_to_shutdown;//ZTE add, defined in zte_misc driver
+#define SHUTDOWN_VOLTAGE 3405000
+static int soc_report_zero = false;
+static int zte_smooth_capacity(struct smb358_charger *chip,int capacity)
+{
+	static bool turnon_flags = true;
+	int cap = capacity;
+
+	pr_debug("CHG:before smooth capacity= %d\n",cap);
+
+	if((turnon_flags)&&(cap > 0))
+		turnon_flags = false;
+
+	if (soc_report_zero) {
+		pr_info("[CHG]report soc 0; return 0\n");
+		//mdelay(5000);
+		return 0;
+	}
+
+	if(cap == 0)
+	{
+		if(!enable_to_shutdown){
+			pr_debug("CHG: enable_to_shutdown=0,return soc=1\n");
+			return 1;
+		}
+
+		if(smb358_get_prop_battery_voltage_now(chip) > SHUTDOWN_VOLTAGE){
+			pr_debug("CHG: batt volt is higher than shutdown volt,return soc=1\n");
+			return 1;
+		}
+
+		if (cap == 0){
+			if(!turnon_flags)
+				soc_report_zero = true;
+			else if(zte_check_soc_report_zero()){
+				soc_report_zero = true;
+				turnon_flags = false;
+				pr_info("soc=0 at power on,set soc_report_zero true\n");
+			}else
+				cap = 1;
+		}
+	}
+
+	pr_debug("CHG:after smooth capacity= %d\n",cap);
+	return cap;
+}
+
 static int smb358_get_prop_batt_capacity(struct smb358_charger *chip)
 {
 	union power_supply_propval ret = {0, };
+	int soc;
 
 	if (chip->fake_battery_soc >= 0)
 		return chip->fake_battery_soc;
@@ -884,9 +998,18 @@ static int smb358_get_prop_batt_capacity(struct smb358_charger *chip)
 	if (chip->bms_psy) {
 		chip->bms_psy->get_property(chip->bms_psy,
 				POWER_SUPPLY_PROP_CAPACITY, &ret);
-		return ret.intval;
+
+		soc = ret.intval;
+		if (soc == 0) {
+			if (!chip->chg_present)
+				pr_warn_ratelimited("Batt 0, CHG absent\n");
+		}
+
+		soc = zte_smooth_capacity(chip,soc);
+		return soc;
 	}
 
+		
 	dev_dbg(chip->dev,
 		"Couldn't get bms_psy, return default capacity\n");
 	return SMB358_DEFAULT_BATT_CAPACITY;
@@ -968,6 +1091,22 @@ smb358_get_prop_battery_voltage_now(struct smb358_charger *chip)
 	}
 	return results.physical;
 }
+
+static int smb358_get_prop_current_now(struct smb358_charger *chip)
+{
+	union power_supply_propval ret = {0,};
+
+	if (chip->bms_psy) {
+		chip->bms_psy->get_property(chip->bms_psy,
+			  POWER_SUPPLY_PROP_CURRENT_NOW, &ret);
+		return ret.intval;
+	} else {
+		pr_debug("No BMS supply registered return 0\n");
+	}
+
+	return 0;
+}
+
 
 static int __smb358_path_suspend(struct smb358_charger *chip, bool suspend)
 {
@@ -1268,28 +1407,37 @@ static int apsd_complete(struct smb358_charger *chip, u8 status)
 
 	dev_dbg(chip->dev, "APSD complete. USB type detected=%d chg_present=%d",
 						type, chip->chg_present);
-
+#if 0
 	power_supply_set_supply_type(chip->usb_psy, type);
-
+#endif
 	 /* SMB is now done sampling the D+/D- lines, indicate USB driver */
 	dev_dbg(chip->dev, "%s updating usb_psy present=%d", __func__,
 			chip->chg_present);
 	power_supply_set_present(chip->usb_psy, chip->chg_present);
 
+
 	return 0;
 }
 
+extern int offcharging_flag;
 static int chg_uv(struct smb358_charger *chip, u8 status)
 {
 	int rc;
+	
+	pr_info("%s enter\n", __func__);
 	/* use this to detect USB insertion only if !apsd */
 	if (chip->disable_apsd && status == 0) {
 		chip->chg_present = true;
 		dev_dbg(chip->dev, "%s updating usb_psy present=%d",
 				__func__, chip->chg_present);
+#if 0
 		power_supply_set_supply_type(chip->usb_psy,
 						POWER_SUPPLY_TYPE_USB);
+#endif
+
+
 		power_supply_set_present(chip->usb_psy, chip->chg_present);
+
 
 		if (chip->bms_controlled_charging)
 			/*
@@ -1309,6 +1457,17 @@ static int chg_uv(struct smb358_charger *chip, u8 status)
 				__func__, chip->chg_present);
 	/* we can't set usb_psy as UNKNOWN here, will lead USERSPACE issue */
 		power_supply_set_present(chip->usb_psy, chip->chg_present);
+	}
+    #ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_DSX_I2C
+    	printk("report usb state to ts\n");
+    	syna_ts_notifier_call_chain(chip->chg_present);
+    #endif
+
+	/* in poweroff charging,once the charger is absent,run poweroff work*/
+	if(offcharging_flag && !chip->chg_present)
+	{
+		pr_info("usb removed!!!poweroff\n");
+		schedule_work(&chip->poweroff_work);
 	}
 
 	power_supply_changed(chip->usb_psy);
@@ -1578,7 +1737,7 @@ static void smb_chg_adc_notification(enum qpnp_tm_state state, void *ctx)
 		smb358_chg_set_appropriate_vddmax(chip);
 	}
 
-	pr_debug("hot %d, cold %d, warm %d, cool %d, jeita supported %d, missing %d, low = %d deciDegC, high = %d deciDegC\n",
+	pr_info("hot %d, cold %d, warm %d, cool %d, jeita supported %d, missing %d, low = %d deciDegC, high = %d deciDegC\n",
 		chip->batt_hot, chip->batt_cold, chip->batt_warm,
 		chip->batt_cool, chip->jeita_supported, chip->battery_missing,
 		chip->adc_param.low_temp, chip->adc_param.high_temp);
@@ -1587,28 +1746,29 @@ static void smb_chg_adc_notification(enum qpnp_tm_state state, void *ctx)
 }
 
 /* only for SMB thermal */
+/* note by zte: use pmic thermal,so donot set cold/hot here*/
 static int hot_hard_handler(struct smb358_charger *chip, u8 status)
 {
 	pr_debug("status = 0x%02x\n", status);
-	chip->batt_hot = !!status;
+	//chip->batt_hot = !!status;
 	return 0;
 }
 static int cold_hard_handler(struct smb358_charger *chip, u8 status)
 {
 	pr_debug("status = 0x%02x\n", status);
-	chip->batt_cold = !!status;
+	//chip->batt_cold = !!status;
 	return 0;
 }
 static int hot_soft_handler(struct smb358_charger *chip, u8 status)
 {
 	pr_debug("status = 0x%02x\n", status);
-	chip->batt_warm = !!status;
+	//chip->batt_warm = !!status;
 	return 0;
 }
 static int cold_soft_handler(struct smb358_charger *chip, u8 status)
 {
 	pr_debug("status = 0x%02x\n", status);
-	chip->batt_cool = !!status;
+	//chip->batt_cool = !!status;
 	return 0;
 }
 
@@ -1759,7 +1919,7 @@ static irqreturn_t smb358_chg_stat_handler(int irq, void *dev_id)
 	u8 rt_stat, prev_rt_stat;
 	int rc;
 	int handler_count = 0;
-
+	pr_info("%s enter\n",__func__);
 	mutex_lock(&chip->irq_complete);
 
 	chip->irq_waiting = true;
@@ -1837,6 +1997,8 @@ static irqreturn_t smb358_chg_valid_handler(int irq, void *dev_id)
 		chip->chg_present = present;
 		dev_dbg(chip->dev, "%s updating usb_psy present=%d",
 				__func__, chip->chg_present);
+		
+
 		power_supply_set_present(chip->usb_psy, chip->chg_present);
 	}
 
@@ -2190,7 +2352,18 @@ static int smb_parse_dt(struct smb358_charger *chip)
 			chip->jeita_supported = true;
 	}
 
-	pr_debug("jeita_supported = %d", chip->jeita_supported);
+	pr_info("jeita_supported = %d,cool_bat_mv = %d,warm_bat_mv = %d,cool_bat_ma = %d,warm_bat_ma = %d\n",
+				chip->jeita_supported,
+				chip->cool_bat_mv,
+				chip->warm_bat_mv,
+				chip->cool_bat_ma,
+				chip->warm_bat_ma);
+
+	pr_info("cool_bat_decidegc = %d,warm_bat_decidegc = %d,cold_bat_decidegc = %d,hot_bat_decidegc = %d\n",
+				chip->cool_bat_decidegc,
+				chip->warm_bat_decidegc,
+				chip->cold_bat_decidegc,
+				chip->hot_bat_decidegc);
 
 	rc = of_property_read_u32(node, "qcom,bat-present-decidegc",
 						&batt_present_degree_negative);
@@ -2368,6 +2541,167 @@ static void smb358_debugfs_init(struct smb358_charger *chip)
 }
 #endif
 
+
+/* ZTE-CHG-JZN add,20150907
+*  when in poweroff charging, once the charger is absent, run kernel poweroff quickly
+*/
+static void
+offcharge_poweroff_work(struct work_struct *work)
+{
+	printk("%s,ZTE shutdown for charger remove at offcharging mode \n",__func__); //XJB
+
+	kernel_power_off();   //ZTE
+	//kernel_restart(NULL);
+}
+
+
+
+static unsigned int poweroff_enable = 1;
+
+module_param(poweroff_enable, uint, 0644);
+MODULE_PARM_DESC(poweroff_enable, "poweroff enable flag bit - " \
+                "0 disables poweroff");
+
+#define OFFCHG_FORCE_POWEROFF_DELTA HZ*60*10 // 10mins
+#define NORMAL_FORCE_POWEROFF_DELTA HZ*60*1 // 1mins
+static void zte_force_power_off_check(int capacity)
+{
+# if 0 //temp by jiang
+	static unsigned long  report_zero_jiffies = 0;
+
+    /*
+      *report zero, but the uplayer is not shutdown in 60s,
+      *kernel should power off directly.
+      */
+	if (capacity == 0) {
+		if (report_zero_jiffies == 0) {
+		    report_zero_jiffies = jiffies;
+			pr_info("start check at %ld\n", report_zero_jiffies);
+		} else {
+			pr_info("offcharging_flag=%d %ld,%ld\n",
+			offcharging_flag,  jiffies, report_zero_jiffies);
+			if ((offcharging_flag && time_after(jiffies,report_zero_jiffies+OFFCHG_FORCE_POWEROFF_DELTA )) ||
+				(!offcharging_flag && time_after(jiffies,report_zero_jiffies+NORMAL_FORCE_POWEROFF_DELTA )) )
+				kernel_power_off();
+		}
+	}else
+		report_zero_jiffies = 0;
+#endif
+}
+
+static int heartbeat_ms = 0;
+static int set_heartbeat_ms(const char *val, struct kernel_param *kp)
+{
+	int ret;
+
+	ret = param_set_int(val, kp);
+	if (ret) {
+		pr_err("error setting value %d\n", ret);
+		return ret;
+	}
+	if (the_smb358_chip) {
+		pr_info("set_heartbeat_ms to %d\n", heartbeat_ms);
+		cancel_delayed_work_sync(&the_smb358_chip->update_heartbeat_work);
+		schedule_delayed_work(&the_smb358_chip->update_heartbeat_work,
+				      round_jiffies_relative(msecs_to_jiffies
+							     (heartbeat_ms)));
+		return 0;
+	}
+	return -EINVAL;
+}
+module_param_call(heartbeat_ms, set_heartbeat_ms, param_get_uint,
+					&heartbeat_ms, 0644);
+
+
+#define LOW_SOC_HEARTBEAT_MS  20000
+#define HEARTBEAT_MS          60000
+static void update_heartbeat(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct smb358_charger *chip = container_of(dwork, struct smb358_charger, update_heartbeat_work);
+	int period = 0;
+
+	int temp,vol,cap,stat,chg_type,batt_pres,curr_now,usb_pres,health;
+	static int old_temp = 0;
+	static int old_cap = 0;
+	static int old_stat = 0;
+	static int old_batt_pres = 0;
+	static int old_usb_pres = 0;
+	static int old_health = 0;
+	static int count=0;
+
+	if (!chip->resume_completed) {
+		pr_info("update_heartbeat launched before device-resume, schedule to 5s later\n");
+		schedule_delayed_work(&chip->update_heartbeat_work,
+                          round_jiffies_relative(msecs_to_jiffies(5000)));
+		return;
+	}
+
+	//update state
+	if(chip==NULL)
+	{
+		pr_err("pmic fatal error:the_chip=null\n!!");
+		return;
+	}
+#if 0
+	if (!chip->bms_psy){
+		chip->bms_psy = power_supply_get_by_name("bms");
+		if(chip->bms_psy)
+			pr_debug("[chg]smb358 get bms_psy success\n");
+	}
+#endif
+	temp      = smb358_get_prop_batt_temp(chip)/10;
+	vol       = smb358_get_prop_battery_voltage_now(chip)/1000;
+	cap       = smb358_get_prop_batt_capacity(chip);
+	stat      = smb358_get_prop_batt_status(chip); // full,charging,discharging
+	chg_type  = smb358_get_prop_charge_type(chip);
+	batt_pres = smb358_get_prop_batt_present(chip);
+	curr_now  = smb358_get_prop_current_now(chip)/1000;
+	health    = smb358_get_prop_batt_health(chip);
+	usb_pres  = chip->chg_present;
+
+	/*if heatbeat_ms is bigger than 500ms, it means users need this information, must output the logs directly.*/
+	if ((heartbeat_ms>=500) || (abs(temp-old_temp) >= 1) || (old_cap != cap) || (old_stat != stat)
+		|| (old_batt_pres != batt_pres) || (old_usb_pres != usb_pres ) || (old_health != health)||(count%5==0)){
+
+		pr_info("***temp=%d,vol=%d,cap=%d,stat=%d,chg_type=%d,curr=%d,batt_pres=%d,usb_pres=%d,health=%d,chg_en=%d\n",
+					temp, vol, cap,stat, chg_type, curr_now, batt_pres,usb_pres,health,!(chip->charging_disabled));
+
+		old_temp      = temp;
+		old_cap       = cap;
+		old_stat      = stat;
+		old_batt_pres = batt_pres;
+		old_usb_pres  = usb_pres;
+		old_health    = health;
+		count         = 0;
+	}
+	count++;
+
+	/*
+	 *report zero, but the up layer is not shutdown in 60s,
+	 *kernel should power off directly.
+	 */
+	if(poweroff_enable == 0)
+	{
+		zte_force_power_off_check(0);
+	}else{
+		zte_force_power_off_check(cap);
+	}
+
+	power_supply_changed(&chip->batt_psy);
+
+	if (heartbeat_ms >= 500) {
+		period = heartbeat_ms;
+	} else {
+		if (cap <= 15)
+			period = LOW_SOC_HEARTBEAT_MS;
+		else
+			period = HEARTBEAT_MS;
+	}
+	schedule_delayed_work(&chip->update_heartbeat_work,
+				      round_jiffies_relative(msecs_to_jiffies(period)));
+}
+
 #define SMB_I2C_VTG_MIN_UV 1800000
 #define SMB_I2C_VTG_MAX_UV 1800000
 static int smb358_charger_probe(struct i2c_client *client,
@@ -2383,13 +2717,11 @@ static int smb358_charger_probe(struct i2c_client *client,
 		dev_dbg(&client->dev, "USB psy not found; deferring probe\n");
 		return -EPROBE_DEFER;
 	}
-
 	chip = devm_kzalloc(&client->dev, sizeof(*chip), GFP_KERNEL);
 	if (!chip) {
 		dev_err(&client->dev, "Couldn't allocate memory\n");
 		return -ENOMEM;
 	}
-
 	chip->client = client;
 	chip->dev = &client->dev;
 	chip->usb_psy = usb_psy;
@@ -2403,7 +2735,6 @@ static int smb358_charger_probe(struct i2c_client *client,
 			pr_err("vadc property missing\n");
 		return rc;
 	}
-
 	rc = smb_parse_dt(chip);
 	if (rc) {
 		dev_err(&client->dev, "Couldn't parse DT nodes rc=%d\n", rc);
@@ -2435,13 +2766,15 @@ static int smb358_charger_probe(struct i2c_client *client,
 	mutex_init(&chip->read_write_lock);
 	mutex_init(&chip->path_suspend_lock);
 
+	INIT_DELAYED_WORK(&chip->update_heartbeat_work, update_heartbeat);
+	INIT_WORK(&chip->poweroff_work, offcharge_poweroff_work);
+
 	/* probe the device to check if its actually connected */
 	rc = smb358_read_reg(chip, CHG_OTH_CURRENT_CTRL_REG, &reg);
 	if (rc) {
 		pr_err("Failed to detect SMB358, device absent, rc = %d\n", rc);
 		goto err_set_vtg_i2c;
 	}
-
 	/* using adc_tm for implementing pmic therm */
 	if (chip->using_pmic_therm) {
 		chip->adc_tm_dev = qpnp_get_adc_tm(chip->dev, "chg");
@@ -2530,7 +2863,7 @@ static int smb358_charger_probe(struct i2c_client *client,
 
 	chip->irq_gpio = of_get_named_gpio_flags(chip->dev->of_node,
 				"qcom,irq-gpio", 0, NULL);
-
+	pr_info("%s: chip->irq_gpio=%d\n", __func__, chip->irq_gpio);
 	/* STAT irq configuration */
 	if (gpio_is_valid(chip->irq_gpio)) {
 		rc = gpio_request(chip->irq_gpio, "smb358_irq");
@@ -2594,8 +2927,19 @@ static int smb358_charger_probe(struct i2c_client *client,
 
 	dump_regs(chip);
 
+	schedule_delayed_work(&chip->update_heartbeat_work,0);
+	the_smb358_chip = chip;
+
 	dev_info(chip->dev, "SMB358 successfully probed. charger=%d, batt=%d\n",
 			chip->chg_present, smb358_get_prop_batt_present(chip));
+
+	/*if in offcharging and usb is absent,run power off*/
+	if(offcharging_flag && !chip->chg_present)
+	{
+		pr_info("in offcharging and usb removed.poweroff!!!\n");
+		schedule_work(&chip->poweroff_work);
+	}
+
 	return 0;
 
 fail_chg_valid_irq:
@@ -2620,6 +2964,8 @@ static int smb358_charger_remove(struct i2c_client *client)
 {
 	struct smb358_charger *chip = i2c_get_clientdata(client);
 
+	cancel_delayed_work_sync(&chip->update_heartbeat_work);
+	cancel_work_sync(&chip->poweroff_work);
 	power_supply_unregister(&chip->batt_psy);
 	if (gpio_is_valid(chip->chg_valid_gpio))
 		gpio_free(chip->chg_valid_gpio);
@@ -2674,6 +3020,7 @@ static int smb358_suspend(struct device *dev)
 
 	chip->resume_completed = false;
 	mutex_unlock(&chip->irq_complete);
+	cancel_delayed_work_sync(&chip->update_heartbeat_work);
 	return 0;
 }
 
@@ -2720,6 +3067,12 @@ static int smb358_resume(struct device *dev)
 		smb358_chg_stat_handler(client->irq, chip);
 		enable_irq(client->irq);
 	}
+	/* NOTE(by zte JZN)--20150720
+	* 1)delay updateheart workqueue to 5s later.
+	* 2)If the system be awake less than 5s, it's not need to run update_heartbeat_work.
+	* 3)In smb358_suspend, the below workqueues will be canceled
+	*/
+	schedule_delayed_work(&chip->update_heartbeat_work,round_jiffies_relative(msecs_to_jiffies(5000)));
 	return 0;
 }
 

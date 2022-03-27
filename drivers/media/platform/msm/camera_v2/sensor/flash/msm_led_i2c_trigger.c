@@ -24,9 +24,17 @@
 #define FLASH_NAME "camera-led-flash"
 #define CAM_FLASH_PINCTRL_STATE_SLEEP "cam_flash_suspend"
 #define CAM_FLASH_PINCTRL_STATE_DEFAULT "cam_flash_default"
-/*#define CONFIG_MSMB_CAMERA_DEBUG*/
+/*enable logs for debug*/
+#define CONFIG_MSMB_CAMERA_DEBUG
 #undef CDBG
-#define CDBG(fmt, args...) pr_debug(fmt, ##args)
+#ifdef CONFIG_MSMB_CAMERA_DEBUG
+#define CDBG(fmt, args...) pr_err(fmt, ##args)
+#else
+#define CDBG(fmt, args...) do { } while (0)
+#endif
+
+/*define power config for speed2,add by fya on 02150508*/
+#define I2C_POWERED_GIPO 928 //gpio17-IOVDD
 
 static void *g_fctrl;
 int32_t msm_led_i2c_trigger_get_subdev_id(struct msm_led_flash_ctrl_t *fctrl,
@@ -394,6 +402,22 @@ int msm_flash_led_high(struct msm_led_flash_ctrl_t *fctrl)
 	return rc;
 }
 
+/* add this to power on/off i2c-qup bus ,only by led-flash ,fengya add  on 20150508*/
+#if 1
+void i2c_bus_power(unsigned gpio , int enable)
+{
+	//CDBG("%s:%d called,enable = %d\n", __func__, __LINE__,enable);
+	if(enable){
+		gpio_request_one(gpio,0, NULL);
+		gpio_set_value_cansleep(gpio,GPIO_OUT_HIGH);
+	}else{
+		gpio_set_value_cansleep(gpio,GPIO_OUT_LOW);
+		gpio_free(gpio);
+	}
+	//CDBG("%s:%d exit\n", __func__, __LINE__);
+}
+#endif
+
 static int32_t msm_led_get_dt_data(struct device_node *of_node,
 		struct msm_led_flash_ctrl_t *fctrl)
 {
@@ -617,6 +641,7 @@ static int32_t msm_led_get_dt_data(struct device_node *of_node,
 			pr_err("%s failed %d\n", __func__, __LINE__);
 			goto ERROR9;
 		}
+
 		fctrl->flashdata->slave_info->sensor_slave_addr = id_info[0];
 		fctrl->flashdata->slave_info->sensor_id_reg_addr = id_info[1];
 		fctrl->flashdata->slave_info->sensor_id = id_info[2];
@@ -781,6 +806,8 @@ int msm_flash_i2c_probe(struct i2c_client *client,
 		pr_err("%s failed line %d\n", __func__, __LINE__);
 		return rc;
 	}
+	/*power i2c bus, by fengya on 20150508*/
+	i2c_bus_power(I2C_POWERED_GIPO,1);
 
 	if (fctrl->pinctrl_info.use_pinctrl == true)
 		msm_flash_pinctrl_init(fctrl);
@@ -795,7 +822,8 @@ int msm_flash_i2c_probe(struct i2c_client *client,
 		pr_err("%s %s sensor_i2c_client NULL\n",
 			__func__, client->name);
 		rc = -EFAULT;
-		return rc;
+		//return rc;
+		goto release_gpio;
 	}
 
 	if (!fctrl->flash_i2c_client->i2c_func_tbl)
@@ -814,11 +842,16 @@ int msm_flash_i2c_probe(struct i2c_client *client,
 	rc = msm_i2c_torch_create_classdev(&(client->dev), NULL);
 	if (rc) {
 		pr_err("%s failed to create classdev %d\n", __func__, __LINE__);
-		return rc;
+		//return rc;
+		goto release_gpio;
 	}
+
+	/*release gpio when do ont use it*/
+	i2c_bus_power(I2C_POWERED_GIPO,0);
 	CDBG("%s:%d probe success\n", __func__, __LINE__);
 	return 0;
-
+release_gpio:
+	i2c_bus_power(I2C_POWERED_GIPO,0);//fya add
 probe_failure:
 	CDBG("%s:%d probe failed\n", __func__, __LINE__);
 	return rc;
