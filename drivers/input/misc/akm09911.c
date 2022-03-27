@@ -38,6 +38,7 @@
 
 #define AKM_DEBUG_IF			0
 #define AKM_HAS_RESET			1
+#define AKM_HAS_HARD_RESET      0 //disable hard reset ZTE_GPS_LPZ_20150131
 #define AKM_INPUT_DEVICE_NAME	"compass"
 #define AKM_DRDY_TIMEOUT_MS		100
 #define AKM_BASE_NUM			10
@@ -285,11 +286,18 @@ static int AKECS_Reset(
 	mutex_lock(&akm->sensor_mutex);
 
 	if (hard != 0) {
-		gpio_set_value(akm->gpio_rstn, 0);
-		udelay(5);
-		gpio_set_value(akm->gpio_rstn, 1);
-		/* No error is returned */
-		err = 0;
+		//+++ add for disabling hard reset ZTE_SNS_LPZ_20150131
+		#if AKM_HAS_HARD_RESET
+		    gpio_set_value(akm->gpio_rstn, 0);
+		    udelay(5);
+		    gpio_set_value(akm->gpio_rstn, 1);
+		    /* No error is returned */
+		    err = 0;
+		#else
+		    dev_err(&akm->i2c->dev,"Return 0 directly(No Hard reset).");
+		    err = 0;
+		#endif
+		//---
 	} else {
 		buffer[0] = AKM_REG_RESET;
 		buffer[1] = AKM_RESET_DATA;
@@ -578,10 +586,14 @@ AKECS_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 			return ret;
 		break;
 	case ECS_IOCTL_RESET:
+		//+++Add for disable reset ZTE_SNS_LPZ_20150131
+		#if AKM_HAS_HARD_RESET
 		dev_vdbg(&akm->i2c->dev, "IOCTL_RESET called.");
 		ret = AKECS_Reset(akm, akm->gpio_rstn);
 		if (ret < 0)
 			return ret;
+		#endif
+		//---
 		break;
 	case ECS_IOCTL_SET_MODE:
 		dev_vdbg(&akm->i2c->dev, "IOCTL_SET_MODE called.");
@@ -1503,9 +1515,13 @@ static int akm_compass_suspend(struct device *dev)
 	if (akm->state.power_on)
 		akm_compass_power_set(akm, false);
 
+	//+++ Add for disabling pinctrl ZTE_SNS_LPZ_2015131
+    #if AKM_HAS_HARD_RESET
 	ret = pinctrl_select_state(akm->pinctrl, akm->pin_sleep);
 	if (ret)
 		dev_err(dev, "Can't select pinctrl state\n");
+	#endif
+	//---
 
 	dev_dbg(&akm->i2c->dev, "suspended\n");
 
@@ -1518,9 +1534,14 @@ static int akm_compass_resume(struct device *dev)
 	int ret = 0;
 	uint8_t mode;
 
+	dev_dbg(dev, "Enter akm_compass_resume\n");
+	//+++ Add for disabling pinctrl ZTE_SNS_LPZ_20150131
+	#if AKM_HAS_HARD_RESET
 	ret = pinctrl_select_state(akm->pinctrl, akm->pin_default);
 	if (ret)
 		dev_err(dev, "Can't select pinctrl state\n");
+	#endif
+    //---
 
 	if (akm->state.power_on) {
 		ret = akm_compass_power_set(akm, true);
@@ -1738,6 +1759,8 @@ static int akm_compass_parse_dt(struct device *dev,
 
 	akm->auto_report = of_property_read_bool(np, "akm,auto-report");
 	akm->use_hrtimer = of_property_read_bool(np, "akm,use-hrtimer");
+    //+++Add for disable reset ZTE_SNS_LPZ_20150131
+	#if AKM_HAS_HARD_RESET
 	akm->gpio_rstn = of_get_named_gpio_flags(dev->of_node,
 			"akm,gpio_rstn", 0, NULL);
 
@@ -1746,6 +1769,8 @@ static int akm_compass_parse_dt(struct device *dev,
 			akm->gpio_rstn);
 		return -EINVAL;
 	}
+	#endif
+	//---
 
 	return 0;
 }
@@ -1757,6 +1782,8 @@ static int akm_compass_parse_dt(struct device *dev,
 }
 #endif /* !CONFIG_OF */
 
+//+++Add for disable reset ZTE_SNS_LPZ_20150131
+#if AKM_HAS_HARD_RESET
 static int akm_pinctrl_init(struct akm_compass_data *akm)
 {
 	struct i2c_client *client = akm->i2c;
@@ -1781,6 +1808,8 @@ static int akm_pinctrl_init(struct akm_compass_data *akm)
 
 	return 0;
 }
+#endif
+//---
 
 static int akm_report_data(struct akm_compass_data *akm)
 {
@@ -1797,8 +1826,9 @@ static int akm_report_data(struct akm_compass_data *akm)
 	}
 
 	if (STATUS_ERROR(dat_buf[8])) {
-		dev_warn(&akm->i2c->dev, "Status error. Reset...\n");
-		AKECS_Reset(akm, 0);
+		dev_warn(&akm->i2c->dev, "Status error.\n");
+		//Disable it for not reporting data when strong iron is closed ZTE_SNS_LPZ_20150825
+		//AKECS_Reset(akm, 0);
 		return -EIO;
 	}
 
@@ -2116,7 +2146,7 @@ int akm_compass_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	int err = 0;
 	int i;
 
-	dev_dbg(&client->dev, "start probing.");
+	dev_info(&client->dev, "start probing.");
 
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 		dev_err(&client->dev,
@@ -2168,12 +2198,20 @@ int akm_compass_probe(struct i2c_client *client, const struct i2c_device_id *id)
 			/* Copy platform data to local. */
 			pdata = client->dev.platform_data;
 			s_akm->layout = pdata->layout;
+			//+++Add for disable reset ZTE_SNS_LPZ_20150131
+		    #if AKM_HAS_HARD_RESET
 			s_akm->gpio_rstn = pdata->gpio_RSTN;
+			#endif
+			//---
 		} else {
 		/* Platform data is not available.
 		   Layout and information should be set by each application. */
 			s_akm->layout = 0;
+		    //+++Add for disable reset ZTE_SNS_LPZ_20150131
+		    #if AKM_HAS_HARD_RESET
 			s_akm->gpio_rstn = 0;
+			#endif
+			//---
 			dev_warn(&client->dev, "%s: No platform data.",
 				__func__);
 		}
@@ -2184,6 +2222,8 @@ int akm_compass_probe(struct i2c_client *client, const struct i2c_device_id *id)
 	/* set client data */
 	i2c_set_clientdata(client, s_akm);
 
+    //+++ Add for disabling pinctrl ZTE_SNS_LPZ_20150131
+    #if AKM_HAS_HARD_RESET
 	/* initialize pinctrl */
 	if (!akm_pinctrl_init(s_akm)) {
 		err = pinctrl_select_state(s_akm->pinctrl, s_akm->pin_default);
@@ -2192,6 +2232,8 @@ int akm_compass_probe(struct i2c_client *client, const struct i2c_device_id *id)
 			goto exit2;
 		}
 	}
+	#endif
+	//---
 
 	/* Pull up the reset pin */
 	AKECS_Reset(s_akm, 1);
@@ -2366,7 +2408,7 @@ static struct i2c_driver akm_compass_driver = {
 
 static int __init akm_compass_init(void)
 {
-	pr_info("AKM compass driver: initialize.");
+	pr_info("AKM compass driver(09911): initialize.");
 	return i2c_add_driver(&akm_compass_driver);
 }
 

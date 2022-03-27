@@ -1,6 +1,6 @@
 /******************** (C) COPYRIGHT 2010 STMicroelectronics ********************
  *
- * Copyright (c) 2014-2015, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014, The Linux Foundation. All rights reserved.
  *
  * File Name          : lis3dh_acc.c
  * Authors            : MSH - Motion Mems BU - Application Team
@@ -73,21 +73,14 @@
 
 #define	DEBUG	1
 
-/*Calibration*/
-#define LIS3DH_CAL_SKIP_COUNT 5
-#define LIS3DH_CAL_MAX		(10 + LIS3DH_CAL_SKIP_COUNT)
-#define LIS3DH_CAL_NUM		99
-#define RAW_TO_1G		16384
-#define FACTORY_CALIBRATION_DELAY 100	/* ms */
-
-#define	G_MAX		17000
+#define	G_MAX		16000
 #define LIS3DH_FIFO_SIZE	32
 #define LIS3DH_TIME_MS_TO_NS	1000000L
 
-#define SENSITIVITY_2G		1	/**	sensitivity scale	*/
-#define SENSITIVITY_4G		2	/**	sensitivity scale	*/
-#define SENSITIVITY_8G		4	/**	sensitivity scale	*/
-#define SENSITIVITY_16G		12	/**	sensitivity scale	*/
+#define SENSITIVITY_2G		1	/**	mg/LSB	*/
+#define SENSITIVITY_4G		2	/**	mg/LSB	*/
+#define SENSITIVITY_8G		4	/**	mg/LSB	*/
+#define SENSITIVITY_16G		12	/**	mg/LSB	*/
 
 /* Accelerometer Sensor Operating Mode */
 #define LIS3DH_ACC_ENABLE	0x01
@@ -234,11 +227,10 @@
 #define	RESUME_ENTRIES		17
 /* end RESUME STATE INDICES */
 
+#define ZTE_ST_ACCEL_CALI //xym add
+
 #define BATCH_MODE_NORMAL		0
 #define BATCH_MODE_WAKE_UPON_FIFO_FULL	2
-
-/* interrput mode for sensor max delay ms */
-#define LIS_INT_MAX_DELAY	1000
 
 enum {
 	LIS3DH_BYPASS_MODE = 0,
@@ -273,7 +265,6 @@ struct lis3dh_acc_data {
 	struct pinctrl_state *pin_sleep;
 
 	struct mutex lock;
-	struct workqueue_struct *data_wq;
 	struct delayed_work input_work;
 
 	struct input_dev *input_dev;
@@ -283,13 +274,10 @@ struct lis3dh_acc_data {
 	int hw_working;
 	/* flag sensor is enabled (batch/poll) */
 	atomic_t enabled;
+#ifdef ZTE_ST_ACCEL_CALI
+	atomic_t cali;//xym add
+#endif
 	int on_before_suspend;
-	int pre_enable;
-
-	char calibrate_buf[LIS3DH_CAL_NUM];
-	int cal_params[3];
-	bool use_cal;
-	atomic_t cal_status;
 
 	u8 sensitivity;
 
@@ -316,7 +304,7 @@ static struct sensors_classdev lis3dh_acc_cdev = {
 	.handle = SENSORS_ACCELERATION_HANDLE,
 	.type = SENSOR_TYPE_ACCELEROMETER,
 	.max_range = "156.8",
-	.resolution = "0.000598144", /* m/s^2 */
+	.resolution = "0.01",
 	.sensor_power = "0.01",
 	.min_delay = 10000,
 	.max_delay = 6400,
@@ -330,9 +318,6 @@ static struct sensors_classdev lis3dh_acc_cdev = {
 	.sensors_poll_delay = NULL,
 	.sensors_set_latency = NULL,
 	.sensors_flush = NULL,
-	.sensors_calibrate = NULL,
-	.sensors_write_cal_params = NULL,
-	.params = NULL,
 };
 
 struct sensor_regulator {
@@ -347,14 +332,74 @@ struct sensor_regulator lis3dh_acc_vreg[] = {
 	{NULL, "vddio", 1700000, 3600000},
 };
 
-static int lis3dh_acc_get_calibrate(struct lis3dh_acc_data *acc,
-					int *xyz);
+#ifdef ZTE_ST_ACCEL_CALI
+static int cali_value[3] = {0,0,0};//xym for calibration
+#define CALI_TIMES 20  //xym for calibration
+#endif
+
+
+#ifdef LIS3DH_VDD_HOLD_FOR_BOARD_TEST
+static int lis3dh_acc_config_regulator_vdd_hold(struct lis3dh_acc_data *acc, bool on)
+{
+	int rc = 0;
+	static struct regulator *vdd_hold = NULL;//vdd hold for board test, xym20141023
+
+	if (on) {
+		vdd_hold = regulator_get(&acc->client->dev, "vddhold");
+		if (IS_ERR(vdd_hold)) {
+			rc = PTR_ERR(vdd_hold);
+			pr_err("%s:vdd_hold regulator get failed rc=%d\n", __func__, rc);
+			vdd_hold = NULL;
+			return rc;
+			//goto error_vdd;
+		}
+
+		if (regulator_count_voltages(vdd_hold) > 0) {
+			rc = regulator_set_voltage(vdd_hold, lis3dh_acc_vreg[0].min_uV, lis3dh_acc_vreg[0].max_uV);
+			if (rc) {
+				pr_err("%s: vdd_hold set voltage failed rc=%d\n", __func__, rc);
+				regulator_put(vdd_hold);
+				vdd_hold = NULL;
+				return rc;
+				//goto error_vdd;
+			}
+		}
+
+		rc = regulator_enable(vdd_hold);
+		if (rc) {
+			pr_err("%s: vdd_hold regulator_enable failed rc =%d\n", __func__, rc);
+			if (regulator_count_voltages(vdd_hold) > 0) {
+				regulator_set_voltage(	vdd_hold, 0, lis3dh_acc_vreg[0].max_uV);
+			}
+			regulator_put(vdd_hold);
+			vdd_hold = NULL;
+			return rc;
+			//goto error_vdd;
+		}
+		return rc;	
+	} else {
+
+		rc = regulator_disable(vdd_hold);
+		if (rc) {
+			pr_err("%s: vdd_hold regulator_disable failed rc =%d\n", __func__, rc);
+			return rc;
+		}
+		
+		if (regulator_count_voltages(vdd_hold) > 0)
+			regulator_set_voltage(vdd_hold, 0, lis3dh_acc_vreg[0].max_uV);
+		
+		regulator_put(vdd_hold);
+		vdd_hold = NULL;
+	}
+	return rc;
+}
+#endif
 
 static inline s64 lis3dh_acc_get_time_ns(void)
 {
 	struct timespec ts;
 
-	get_monotonic_boottime(&ts);
+	ktime_get_ts(&ts);
 	return timespec_to_ns(&ts);
 }
 
@@ -1106,9 +1151,14 @@ static int lis3dh_acc_get_acceleration_data(struct lis3dh_acc_data *acc,
 	if (err < 0)
 		return err;
 
-	hw_d[0] = (((s16) ((acc_data[1] << 8) | acc_data[0])));
-	hw_d[1] = (((s16) ((acc_data[3] << 8) | acc_data[2])));
-	hw_d[2] = (((s16) ((acc_data[5] << 8) | acc_data[4])));
+	hw_d[0] = (((s16) ((acc_data[1] << 8) | acc_data[0])) >> 4);
+	hw_d[1] = (((s16) ((acc_data[3] << 8) | acc_data[2])) >> 4);
+	hw_d[2] = (((s16) ((acc_data[5] << 8) | acc_data[4])) >> 4);
+
+	hw_d[0] = hw_d[0] * acc->sensitivity;
+	hw_d[1] = hw_d[1] * acc->sensitivity;
+	hw_d[2] = hw_d[2] * acc->sensitivity;
+
 
 	xyz[0] = ((acc->pdata->negate_x) ? (-hw_d[acc->pdata->axis_map_x])
 		   : (hw_d[acc->pdata->axis_map_x]));
@@ -1117,51 +1167,30 @@ static int lis3dh_acc_get_acceleration_data(struct lis3dh_acc_data *acc,
 	xyz[2] = ((acc->pdata->negate_z) ? (-hw_d[acc->pdata->axis_map_z])
 		   : (hw_d[acc->pdata->axis_map_z]));
 
-	xyz[0] = xyz[0] * acc->sensitivity;
-	xyz[1] = xyz[1] * acc->sensitivity;
-	xyz[2] = xyz[2] * acc->sensitivity;
-
 	dev_dbg(&acc->client->dev, "%s read x=%d, y=%d, z=%d\n",
 				LIS3DH_ACC_DEV_NAME, xyz[0], xyz[1], xyz[2]);
-	if (acc->use_cal) {
-		err = lis3dh_acc_get_calibrate(acc, xyz);
-		if (err < 0) {
-			dev_err(&acc->client->dev,
-					"get calibrate data falied\n");
-			return err;
-		}
-	}
-
 	return err;
 }
 
 static void lis3dh_acc_report_values(struct lis3dh_acc_data *acc,
 					int *xyz)
 {
-	ktime_t timestamp;
+#ifdef ZTE_ST_ACCEL_CALI
+	xyz[0] -= cali_value[0];
+	xyz[1] -= cali_value[1];
+	xyz[2] -= cali_value[2];
+#endif //xym, add for calibration
 
-	timestamp = ktime_get_boottime();
 	input_report_abs(acc->input_dev, ABS_X, xyz[0]);
 	input_report_abs(acc->input_dev, ABS_Y, xyz[1]);
 	input_report_abs(acc->input_dev, ABS_Z, xyz[2]);
-	input_event(acc->input_dev,
-		EV_SYN, SYN_TIME_SEC,
-		ktime_to_timespec(timestamp).tv_sec);
-	input_event(acc->input_dev,
-		EV_SYN, SYN_TIME_NSEC,
-		ktime_to_timespec(timestamp).tv_nsec);
 	input_sync(acc->input_dev);
 }
 
 static int lis3dh_acc_enable(struct lis3dh_acc_data *acc)
 {
 	int err;
-
-	if (atomic_read(&acc->cal_status)) {
-		dev_err(&acc->client->dev,
-			"can not enable when sensor do calibration\n");
-		return -EBUSY;
-	}
+	pr_info("%s: \n", __func__);	
 	dev_dbg(&acc->client->dev, "enable acc: state =%d\n",
 			atomic_read(&acc->enabled));
 	if (!atomic_cmpxchg(&acc->enabled, 0, 1)) {
@@ -1181,7 +1210,7 @@ static int lis3dh_acc_enable(struct lis3dh_acc_data *acc)
 			return err;
 		}
 		if (!acc->pdata->enable_int && !acc->use_batch) {
-			queue_delayed_work(acc->data_wq, &acc->input_work,
+			schedule_delayed_work(&acc->input_work,
 				msecs_to_jiffies(acc->delay_ms));
 			return 0;
 		}
@@ -1210,12 +1239,7 @@ static int lis3dh_acc_enable(struct lis3dh_acc_data *acc)
 static int lis3dh_acc_disable(struct lis3dh_acc_data *acc)
 {
 	int err = 0;
-
-	if (atomic_read(&acc->cal_status)) {
-		dev_err(&acc->client->dev,
-			"can not disable when sensor do calibration now\n");
-		return -EBUSY;
-	}
+	pr_info("%s: \n", __func__);	
 	dev_dbg(&acc->client->dev, "disable state=%d\n",
 		atomic_read(&acc->enabled));
 	if (atomic_cmpxchg(&acc->enabled, 1, 0)) {
@@ -1361,141 +1385,108 @@ static int write_reg(struct device *dev, const char *buf, u8 reg,
 	return err;
 }
 
-static int lis3dh_axis_calibrate(struct lis3dh_acc_data *acc,
-				int *cal_xyz)
+#ifdef ZTE_ST_ACCEL_CALI	//xym
+static ssize_t attr_get_cali(struct device *dev,
+			       struct device_attribute *attr, char *buf)
 {
-	int xyz[3] = { 0 };
-	int arry[3] = { 0 };
-	int err;
+	//struct lis3dh_acc_data *acc = dev_get_drvdata(dev);
+	//int val = atomic_read(&acc->cali);
+
+	return sprintf(buf, "%d %d %d\n", cali_value[0], cali_value[1], cali_value[2]);
+}
+
+static ssize_t attr_set_cali(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t size)
+{
+	struct lis3dh_acc_data *acc = dev_get_drvdata(dev);
+	unsigned long val;
 	int i;
+	int xyz[3] = {0};
+	int temp_xyz[3] = {0};
 
-	for (i = 0; i < LIS3DH_CAL_MAX; i++) {
-		msleep(FACTORY_CALIBRATION_DELAY);
-		err = lis3dh_acc_get_acceleration_data(acc, xyz);
-		if (err < 0) {
-			dev_err(&acc->client->dev,
-					"get_acceleration_data failed\n");
-			return err;
+	if (strict_strtoul(buf, 10, &val))
+		return -EINVAL;
+
+	if (val) 
+	{
+		atomic_set(&acc->cali, 1);
+		printk(KERN_INFO "%s %s: calibrate begin\n", LIS3DH_ACC_DEV_NAME, __func__);
+		
+		for( i = 0; i < CALI_TIMES; i++)
+		{
+			msleep(50); //xym, add for calibration
+			
+			//mutex_lock(&acc->lock);
+  			lis3dh_acc_get_acceleration_data(acc, xyz);
+			//mutex_unlock(&acc->lock); 
+			temp_xyz[0]+= xyz[0];
+			temp_xyz[1]+= xyz[1];
+			temp_xyz[2]+= xyz[2];
+			
+		   printk(KERN_INFO "%s %s: xyz = %d, %d, %d\n", 
+						LIS3DH_ACC_DEV_NAME, __func__, xyz[0], xyz[1], xyz[2]);			
+			
+		   printk(KERN_INFO "%s %s: temp_xyz = %d, %d, %d\n", 
+						LIS3DH_ACC_DEV_NAME, __func__, temp_xyz[0], temp_xyz[1], temp_xyz[2]);			
+			 
 		}
-		if (i < LIS3DH_CAL_SKIP_COUNT)
-			continue;
-		arry[0] += xyz[0];
-		arry[1] += xyz[1];
-		arry[2] += xyz[2];
-	}
-	cal_xyz[0] = arry[0] / (LIS3DH_CAL_MAX -
-			LIS3DH_CAL_SKIP_COUNT);
-	cal_xyz[1] = arry[1] / (LIS3DH_CAL_MAX -
-			LIS3DH_CAL_SKIP_COUNT);
-	cal_xyz[2] = arry[2] / (LIS3DH_CAL_MAX -
-			LIS3DH_CAL_SKIP_COUNT);
+		
+		cali_value[0] = temp_xyz[0]/CALI_TIMES - 0;
+		cali_value[1] = temp_xyz[1]/CALI_TIMES - 0;
+		cali_value[2] = ((temp_xyz[2]/CALI_TIMES) - 1024);//xym
 
-	return 0;
+		printk(KERN_INFO "%s %s: calibrate end, cali_value = %d, %d, %d\n", LIS3DH_ACC_DEV_NAME, __func__, 
+		                cali_value[0],	cali_value[1], cali_value[2]);
+	}
+	else
+	{
+		atomic_set(&acc->cali, 0);
+		cali_value[0] = 0;
+		cali_value[1] = 0;
+		cali_value[2] = 0;
+	}
+	
+	return size;
 }
 
-static int lis3dh_calibrate(struct sensors_classdev *sensors_cdev,
-		int axis, int apply_now)
+//xym, add for calibration, begin
+static ssize_t attr_get_cali_data(struct device *dev,
+			       struct device_attribute *attr, char *buf)
 {
-	struct lis3dh_acc_data *acc = container_of(sensors_cdev,
-		struct lis3dh_acc_data, cdev);
-	int xyz[3] = { 0 };
-	int err;
+	return sprintf(buf, " %d %d %d \n", cali_value[0], cali_value[1], cali_value[2]);
+}
 
-	acc->use_cal = false;
-	acc->pre_enable = atomic_read(&acc->enabled);
-	if (acc->pre_enable) {
-		err = lis3dh_acc_disable(acc);
-		if (err < 0) {
-			dev_err(&acc->client->dev, "cannot disable sensor\n");
-			return err;
+static ssize_t attr_set_cali_data(struct device *dev,
+			       struct device_attribute *attr,
+			       const char *buf, size_t size)
+{
+    char valuestr[5];
+	int nvalue = 0;
+	int countxyz = 0; 
+	long val = 0;
+	
+    while ((*buf != '\0')&&(*buf != '\n')&&(countxyz<=2)) 
+	{
+		nvalue = 0;
+		
+		while((*buf != ' ')&&(*buf != '\0')&&(*buf != '\n'&&(countxyz<=2))) 
+		{
+			valuestr[nvalue++] = *buf++;
 		}
-	}
-	if (atomic_cmpxchg(&acc->cal_status, 0, 1)) {
-		dev_err(&acc->client->dev, "do calibration error\n");
-		return -EBUSY;
-	}
-	err = lis3dh_acc_device_power_on(acc);
-	if (err < 0) {
-		dev_err(&acc->client->dev, "cannot power on sensor\n");
-		return err;
-	}
-	err = lis3dh_axis_calibrate(acc, xyz);
-	if (err < 0) {
-		dev_err(&acc->client->dev, "accel calibrate error\n");
-		return err;
-	}
-	switch (axis) {
-	case AXIS_X:
-		xyz[1] = 0;
-		xyz[2] = 0;
-		break;
-	case AXIS_Y:
-		xyz[0] = 0;
-		xyz[2] = 0;
-		break;
-	case AXIS_Z:
-		xyz[0] = 0;
-		xyz[1] = 0;
-		xyz[2] = xyz[2] - RAW_TO_1G;
-		break;
-	case AXIS_XYZ:
-		xyz[2] = xyz[2] - RAW_TO_1G;
-		break;
-	default:
-		dev_err(&acc->client->dev, "can not calibrate accel\n");
-		break;
-	}
-	memset(acc->calibrate_buf, 0, sizeof(acc->calibrate_buf));
-	snprintf(acc->calibrate_buf, sizeof(acc->calibrate_buf),
-			"%d,%d,%d", xyz[0], xyz[1], xyz[2]);
-	if (apply_now) {
-		acc->cal_params[0] = xyz[0];
-		acc->cal_params[1] = xyz[1];
-		acc->cal_params[2] = xyz[2];
-		acc->use_cal = true;
-	}
-	lis3dh_acc_device_power_off(acc);
-	atomic_set(&acc->cal_status, 0);
-	if (acc->pre_enable) {
-		err = lis3dh_acc_enable(acc);
-		if (err < 0) {
-			dev_err(&acc->client->dev, "cannot enable sensor\n");
-			return err;
-		}
-	}
-
-	return 0;
+		valuestr[nvalue] = '\0';
+		if( strict_strtol(valuestr, 10, &val))
+			return -EINVAL;
+		
+		cali_value[countxyz] = (int)val;
+		countxyz++;
+		buf++;
+    }
+	return size;
 }
+//xym, add for calibration, end
 
-static int lis3dh_write_cal_params(struct sensors_classdev *sensors_cdev,
-		struct cal_result_t *cal_result)
-{
-	struct lis3dh_acc_data *acc = container_of(sensors_cdev,
-		struct lis3dh_acc_data, cdev);
-	acc->cal_params[0] = cal_result->offset_x;
-	acc->cal_params[1] = cal_result->offset_y;
-	acc->cal_params[2] = cal_result->offset_z;
-
-	snprintf(acc->calibrate_buf, sizeof(acc->calibrate_buf),
-			"%d,%d,%d", acc->cal_params[0], acc->cal_params[1],
-			acc->cal_params[2]);
-	acc->use_cal = true;
-	dev_dbg(&acc->client->dev, "read accel calibrate bias %d,%d,%d\n",
-		acc->cal_params[0], acc->cal_params[1], acc->cal_params[2]);
-
-	return 0;
-}
-
-static int lis3dh_acc_get_calibrate(struct lis3dh_acc_data *acc, int *xyz)
-{
-	xyz[0] -=  acc->cal_params[0];
-	xyz[1] -=  acc->cal_params[1];
-	xyz[2] -=  acc->cal_params[2];
-	dev_dbg(&acc->client->dev, "%s read calibrate x=%d, y=%d, z=%d\n",
-			LIS3DH_ACC_DEV_NAME, xyz[0], xyz[1], xyz[2]);
-
-	return 0;
-}
+#endif
 
 static ssize_t attr_get_polling_rate(struct device *dev,
 				     struct device_attribute *attr,
@@ -1506,6 +1497,7 @@ static ssize_t attr_get_polling_rate(struct device *dev,
 	mutex_lock(&acc->lock);
 	val = acc->delay_ms;
 	mutex_unlock(&acc->lock);
+	pr_info("%s: %d \n", __func__, val);	
 	return snprintf(buf, 8, "%d\n", val);
 }
 
@@ -1516,19 +1508,16 @@ static ssize_t attr_set_polling_rate(struct device *dev,
 	struct lis3dh_acc_data *acc = dev_get_drvdata(dev);
 	unsigned long interval_ms;
 
-	if (atomic_read(&acc->cal_status)) {
-		dev_err(&acc->client->dev,
-			"can not set rate when sensor do calibration now\n");
-		return -EBUSY;
-	}
 	if (kstrtoul(buf, 10, &interval_ms))
 		return -EINVAL;
 	if (!interval_ms)
 		return -EINVAL;
+	pr_info("%s: %d +++\n", __func__, (int)interval_ms);	
 	mutex_lock(&acc->lock);
 	acc->delay_ms = interval_ms;
 	lis3dh_acc_update_odr(acc, interval_ms);
 	mutex_unlock(&acc->lock);
+	pr_info("%s: ---\n", __func__);
 	return size;
 }
 
@@ -1763,7 +1752,10 @@ static ssize_t attr_addr_set(struct device *dev, struct device_attribute *attr,
 #endif
 
 static struct device_attribute attributes[] = {
-
+#ifdef ZTE_ST_ACCEL_CALI	
+	__ATTR(cali, 0600, attr_get_cali, attr_set_cali),
+	__ATTR(cali_data, 0600, attr_get_cali_data,  attr_set_cali_data),	//xym, add for calibration
+#endif
 	__ATTR(poll_delay, 0664, attr_get_polling_rate,
 			attr_set_polling_rate),
 	__ATTR(range, 0664, attr_get_range, attr_set_range),
@@ -1817,11 +1809,11 @@ static int lis3dh_acc_flush(struct sensors_classdev *sensors_cdev)
 {
 	struct lis3dh_acc_data *acc = container_of(sensors_cdev,
 			struct lis3dh_acc_data, cdev);
-	s64 timestamp, sec, ns;
+	s64 timestamp;
 	int err;
 	int fifo_cnt;
 	int i;
-	u32 time_ms;
+	u32 time_h, time_l, time_ms;
 	int xyz[3] = {0};
 
 	timestamp = lis3dh_acc_get_time_ns();
@@ -1842,14 +1834,14 @@ static int lis3dh_acc_flush(struct sensors_classdev *sensors_cdev)
 		} else {
 			timestamp = timestamp +
 				(time_ms * LIS3DH_TIME_MS_TO_NS);
-			sec = timestamp;
-			ns = do_div(sec, NSEC_PER_SEC);
-			input_event(acc->input_dev, EV_SYN, SYN_TIME_SEC, sec);
-			input_event(acc->input_dev, EV_SYN, SYN_TIME_NSEC, ns);
-			input_report_abs(acc->input_dev, ABS_X, xyz[0]);
-			input_report_abs(acc->input_dev, ABS_Y, xyz[1]);
-			input_report_abs(acc->input_dev, ABS_Z, xyz[2]);
-			input_sync(acc->input_dev);
+			time_h = (u32)(((u64)timestamp >> 32) & 0xFFFFFFFF);
+			time_l = (u32)(timestamp & 0xFFFFFFFF);
+
+			input_report_abs(acc->input_dev, ABS_RX,
+					time_h);
+			input_report_abs(acc->input_dev, ABS_RY,
+					time_l);
+			lis3dh_acc_report_values(acc, xyz);
 		}
 	}
 
@@ -1869,11 +1861,6 @@ static int lis3dh_acc_poll_delay_set(struct sensors_classdev *sensors_cdev,
 	int err;
 	int watermark;
 
-	if (atomic_read(&acc->cal_status)) {
-		dev_err(&acc->client->dev,
-			"can not set delay when sensor do calibration now\n");
-		return -EBUSY;
-	}
 	dev_dbg(&acc->client->dev, "set poll delay =%d\n", delay_msec);
 	mutex_lock(&acc->lock);
 	acc->delay_ms = delay_msec;
@@ -1935,7 +1922,6 @@ static int lis3dh_latency_set(struct sensors_classdev *cdev,
 	struct lis3dh_acc_data *acc = container_of(cdev,
 		struct lis3dh_acc_data, cdev);
 	struct i2c_client *client = acc->client;
-	int ret;
 
 	/* Does not support batch in while interrupt is not enabled */
 	if (!acc->pdata->enable_int) {
@@ -1943,16 +1929,8 @@ static int lis3dh_latency_set(struct sensors_classdev *cdev,
 			"Cannot set batch mode, interrupt is not enabled!\n");
 		return -EPERM;
 	}
-
-	acc->fifo_timeout_ms = max_latency;
 	acc->use_batch = max_latency ? true : false;
-
-	ret = lis3dh_acc_enable_batch(acc, max_latency);
-	if (ret) {
-		dev_err(&client->dev, "enable batch:%d failed\n", max_latency);
-		return ret;
-	}
-
+	acc->fifo_timeout_ms = max_latency;
 	return 0;
 }
 
@@ -1974,8 +1952,8 @@ static void lis3dh_acc_input_work_func(struct work_struct *work)
 	else
 		lis3dh_acc_report_values(acc, xyz);
 
-	queue_delayed_work(acc->data_wq, &acc->input_work,
-		msecs_to_jiffies(acc->delay_ms));
+	schedule_delayed_work(&acc->input_work, msecs_to_jiffies(
+			acc->delay_ms));
 	mutex_unlock(&acc->lock);
 }
 
@@ -2031,7 +2009,9 @@ static int lis3dh_acc_input_init(struct lis3dh_acc_data *acc)
 {
 	int err;
 
-	acc->input_dev = devm_input_allocate_device(&acc->client->dev);
+	if (!acc->pdata->enable_int)
+		INIT_DELAYED_WORK(&acc->input_work, lis3dh_acc_input_work_func);
+	acc->input_dev = input_allocate_device();
 	if (!acc->input_dev) {
 		err = -ENOMEM;
 		dev_err(&acc->client->dev, "input device allocation failed\n");
@@ -2070,13 +2050,21 @@ static int lis3dh_acc_input_init(struct lis3dh_acc_data *acc)
 		dev_err(&acc->client->dev,
 				"unable to register input device %s\n",
 				acc->input_dev->name);
-		goto err0;
+		goto err1;
 	}
 
 	return 0;
 
+err1:
+	input_free_device(acc->input_dev);
 err0:
 	return err;
+}
+
+static void lis3dh_acc_input_cleanup(struct lis3dh_acc_data *acc)
+{
+	input_unregister_device(acc->input_dev);
+	input_free_device(acc->input_dev);
 }
 
 static int lis3dh_pinctrl_init(struct lis3dh_acc_data *acc)
@@ -2186,11 +2174,24 @@ static int lis3dh_parse_dt(struct device *dev,
 
 	pdata->enable_int = of_property_read_bool(np, "st,enable-int");
 
+	pr_info("%s: min_interval=%d,\n\t  init_interval=%d\n",__func__, pdata->min_interval, pdata->init_interval);
+	pr_info("\t  axis_map_x=%d,\n\t  axis_map_y=%d,\n\t  axis_map_z=%d\n", pdata->axis_map_x, pdata->axis_map_y, pdata->axis_map_z);
+	pr_info("\t  negate_x=%d,\n\t  negate_y=%d,\n\t  negate_z=%d\n", pdata->negate_x, pdata->negate_y, pdata->negate_z);
+	pr_info("\t  g_range=%d(0 means LIS3DH_ACC_G_2G)\n", pdata->g_range);
+	pr_info("\t  enable_int=%d\n", pdata->enable_int);
+
+	pdata->gpio_int1 = -1;
+	pdata->gpio_int2 = -1;
+
+
 	pdata->gpio_int1 = of_get_named_gpio_flags(dev->of_node,
 				"st,gpio-int1", 0, NULL);
+	pr_info("%s: gpio_int1=%d\n",__func__, pdata->gpio_int1);
 
 	pdata->gpio_int2 = of_get_named_gpio_flags(dev->of_node,
 				"st,gpio-int2", 0, NULL);
+	pr_info("%s: gpio_int2=%d\n",__func__, pdata->gpio_int2);
+
 	return 0;
 }
 #else
@@ -2207,7 +2208,8 @@ static int lis3dh_acc_probe(struct i2c_client *client,
 
 	struct lis3dh_acc_data *acc;
 	int err = -1;
-
+	pr_info("%s: \n",__func__);
+	
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C)) {
 		dev_err(&client->dev, "client not i2c capable\n");
 		err = -ENODEV;
@@ -2255,26 +2257,28 @@ static int lis3dh_acc_probe(struct i2c_client *client,
 		err = -ENODEV;
 		goto exit_kfree_pdata;
 	}
+	pr_info("%s: 1 \n",__func__);
 
 	err = lis3dh_acc_validate_pdata(acc);
 	if (err < 0) {
 		dev_err(&client->dev, "failed to validate platform data\n");
 		goto exit_kfree_pdata;
 	}
-
+	pr_info("%s: 2\n",__func__);
 	/* initialize pinctrl */
 	err = lis3dh_pinctrl_init(acc);
 	if (err) {
 		dev_err(&client->dev, "Can't initialize pinctrl\n");
 			goto exit_kfree_pdata;
 	}
+	pr_info("%s: 3\n",__func__);
 	err = pinctrl_select_state(acc->pinctrl, acc->pin_default);
 	if (err) {
 		dev_err(&client->dev,
 			"Can't select pinctrl default state\n");
 		goto exit_kfree_pdata;
 	}
-
+	pr_info("%s: 4\n",__func__);
 	if (acc->pdata->init) {
 		err = acc->pdata->init();
 		if (err < 0) {
@@ -2311,11 +2315,6 @@ static int lis3dh_acc_probe(struct i2c_client *client,
 	acc->resume_state[RES_TT_LIM] = 0x00;
 	acc->resume_state[RES_TT_TLAT] = 0x00;
 	acc->resume_state[RES_TT_TW] = 0x00;
-	acc->cal_params[0] = 0;
-	acc->cal_params[1] = 0;
-	acc->cal_params[2] = 0;
-	acc->use_cal = false;
-	atomic_set(&acc->cal_status, 0);
 
 	if (acc->pdata->enable_int) {
 		if (gpio_is_valid(acc->pdata->gpio_int1))
@@ -2323,10 +2322,22 @@ static int lis3dh_acc_probe(struct i2c_client *client,
 		acc->resume_state[RES_CTRL_REG4] = CONFIG_BLOCK_READ;
 	}
 
+#ifdef LIS3DH_VDD_HOLD_FOR_BOARD_TEST
+	err = lis3dh_acc_config_regulator_vdd_hold(acc, true);
+	if (err < 0) {
+		dev_err(&client->dev, "vdd_hold power on failed: %d\n", err);
+		goto err_pdata_init;
+	}
+#endif
+
 	err = lis3dh_acc_config_regulator(acc, true);
 	if (err < 0) {
 		dev_err(&client->dev, "Configure power failed: %d\n", err);
+#ifdef LIS3DH_VDD_HOLD_FOR_BOARD_TEST
+		goto err_vdd_hold_init;
+#else
 		goto err_pdata_init;
+#endif		
 	}
 
 	err = lis3dh_acc_device_power_on(acc);
@@ -2359,22 +2370,12 @@ static int lis3dh_acc_probe(struct i2c_client *client,
 		goto err_power_off;
 	}
 
-	acc->data_wq = NULL;
-	if (!acc->pdata->enable_int) {
-		acc->data_wq = create_freezable_workqueue("lis3dh_data_work");
-		if (!acc->data_wq) {
-			dev_err(&client->dev, "create workquque failed\n");
-			goto err_power_off;
-		}
-		INIT_DELAYED_WORK(&acc->input_work,
-			lis3dh_acc_input_work_func);
-	}
 
 	err = create_sysfs_interfaces(&client->dev);
 	if (err < 0) {
 		dev_err(&client->dev,
 		   "device LIS3DH_ACC_DEV_NAME sysfs register failed\n");
-		goto err_destroy_workqueue;
+		goto err_input_cleanup;
 	}
 
 	acc->cdev = lis3dh_acc_cdev;
@@ -2386,13 +2387,8 @@ static int lis3dh_acc_probe(struct i2c_client *client,
 		acc->cdev.sensors_flush = lis3dh_acc_flush;
 		acc->cdev.fifo_reserved_event_count = LIS3DH_FIFO_SIZE;
 		acc->cdev.fifo_max_event_count = LIS3DH_FIFO_SIZE;
-		acc->cdev.max_delay = LIS_INT_MAX_DELAY;
 	}
-	acc->cdev.sensors_calibrate = lis3dh_calibrate;
-	acc->cdev.sensors_write_cal_params = lis3dh_write_cal_params;
-	memset(&acc->cdev.cal_result, 0, sizeof(acc->cdev.cal_result));
-	acc->cdev.params = acc->calibrate_buf;
-	err = sensors_classdev_register(&acc->input_dev->dev, &acc->cdev);
+	err = sensors_classdev_register(&client->dev, &acc->cdev);
 	if (err) {
 		dev_err(&client->dev,
 			"class device create failed: %d\n", err);
@@ -2450,13 +2446,16 @@ err_unreg_sensor_class:
 	sensors_classdev_unregister(&acc->cdev);
 err_remove_sysfs_int:
 	remove_sysfs_interfaces(&client->dev);
-err_destroy_workqueue:
-	if (acc->data_wq)
-		destroy_workqueue(acc->data_wq);
+err_input_cleanup:
+	lis3dh_acc_input_cleanup(acc);
 err_power_off:
 	lis3dh_acc_device_power_off(acc);
 err_regulator_init:
 	lis3dh_acc_config_regulator(acc, false);
+#ifdef LIS3DH_VDD_HOLD_FOR_BOARD_TEST
+err_vdd_hold_init:
+	lis3dh_acc_config_regulator_vdd_hold(acc, false);
+#endif
 err_pdata_init:
 	if (acc->pdata->exit)
 		acc->pdata->exit();
@@ -2482,10 +2481,9 @@ static int lis3dh_acc_remove(struct i2c_client *client)
 		free_irq(acc->irq2, acc);
 
 	sensors_classdev_unregister(&acc->cdev);
+	lis3dh_acc_input_cleanup(acc);
 	lis3dh_acc_config_regulator(acc, false);
 	remove_sysfs_interfaces(&client->dev);
-	if (acc->data_wq)
-		destroy_workqueue(acc->data_wq);
 
 	if (acc->pdata->exit)
 		acc->pdata->exit();
@@ -2496,7 +2494,7 @@ static int lis3dh_acc_remove(struct i2c_client *client)
 }
 
 #ifdef CONFIG_PM
-static int lis3dh_acc_resume(struct i2c_client *client)
+static int lis3dh_acc_resume(struct i2c_client *client)//not use
 {
 	struct lis3dh_acc_data *acc = i2c_get_clientdata(client);
 	int err;
@@ -2525,7 +2523,7 @@ static int lis3dh_acc_resume(struct i2c_client *client)
 	return 0;
 }
 
-static int lis3dh_acc_suspend(struct i2c_client *client, pm_message_t mesg)
+static int lis3dh_acc_suspend(struct i2c_client *client, pm_message_t mesg)//not use
 {
 	struct lis3dh_acc_data *acc = i2c_get_clientdata(client);
 	int err;
