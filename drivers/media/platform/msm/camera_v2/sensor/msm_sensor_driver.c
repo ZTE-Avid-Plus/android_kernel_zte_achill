@@ -17,22 +17,7 @@
 #include "camera.h"
 #include "msm_cci.h"
 #include "msm_camera_dt_util.h"
-/*
-  * use  camera sensor engineering mode  interface
-  * use  test camera sensor mipi clock interface
-  * by ZTE_YCM_20140710 yi.changming 000006
-  */
-// --->
-#include "zte_camera_sensor_util.h"
- // <---
- /*
-  * camera sensor module compatile
-  * 
-  * by ZTE_YCM_20140728 yi.changming 000028
-  */
-// --->
- #include "../eeprom/msm_eeprom.h"
-  // <---
+
 /* Logging macro */
 #undef CDBG
 #define CDBG(fmt, args...) pr_debug(fmt, ##args)
@@ -159,60 +144,6 @@ static int32_t msm_sensor_driver_create_v4l_subdev
 
 	return rc;
 }
-/*
-  * camera sensor module compatile
-  * 
-  * by ZTE_YCM_20140728 yi.changming 000028
-  */
-// --->	
-static int32_t msm_get_info_from_eeprom(
-		struct msm_sensor_ctrl_t *s_ctrl,struct device_node *eeprom_node)
-{
-	struct platform_device *eeprom_device = NULL;
-	struct v4l2_subdev *sd = NULL;
-	struct msm_eeprom_ctrl_t *e_ctrl = NULL;
-
-	if (!eeprom_node) {
-		pr_err("%s: can't find eeprom sensor phandle\n", __func__);
-		return -1;
-	}
-	
-	eeprom_device = of_find_device_by_node(eeprom_node);
-	if (!eeprom_device) {
-			pr_err("%s:%d: can't find the device by node\n", __func__,__LINE__);
-			return -1;
-	}
-		
-	sd = platform_get_drvdata(eeprom_device);
-	if(!sd){
-		pr_err("%s:%d: can't find the eeprom sd\n", __func__,__LINE__);
-		return -1;
-	}
-
-	e_ctrl = v4l2_get_subdevdata(sd);
-
-	if(!e_ctrl){
-		pr_err("%s:%d: can't find the eeprom sd\n", __func__,__LINE__);
-		return -1;
-	}
-
-	s_ctrl->sensordata->sensor_module_name = e_ctrl->sensor_module_name;
-	s_ctrl->sensordata->chromtix_lib_name= e_ctrl->chromtix_lib_name;
-	s_ctrl->sensordata->default_chromtix_lib_name= e_ctrl->default_chromtix_lib_name;
-
-	if(e_ctrl->sensor_module_name)
-		pr_err("%s:%d: sensor_module_name:%s\n", __func__,__LINE__,e_ctrl->sensor_module_name);
-	
-	if(e_ctrl->chromtix_lib_name)
-		pr_err("%s:%d:chromtix_lib_name: %s\n", __func__,__LINE__,e_ctrl->chromtix_lib_name);
-	
-	if(e_ctrl->default_chromtix_lib_name)
-		pr_err("%s:%d:default_chromtix_lib_name: %s\n", __func__,__LINE__,e_ctrl->default_chromtix_lib_name);
-
-	return 0;
-	
-}
-// <---	
 
 static int32_t msm_sensor_fill_eeprom_subdevid_by_name(
 				struct msm_sensor_ctrl_t *s_ctrl)
@@ -278,14 +209,7 @@ static int32_t msm_sensor_fill_eeprom_subdevid_by_name(
 			of_node_put(src_node);
 			continue;
 		}
-/*
-  * camera sensor module compatile
-  * 
-  * by ZTE_YCM_20140728 yi.changming 000028
-  */
-// --->		
-		msm_get_info_from_eeprom(s_ctrl,src_node);
-// <---		
+
 		*eeprom_subdev_id = val;
 		CDBG("Done. Eeprom subdevice id is %d\n", val);
 		of_node_put(src_node);
@@ -728,7 +652,6 @@ int32_t msm_sensor_driver_probe(void *setting,
 	struct msm_camera_slave_info        *camera_info = NULL;
 
 	unsigned long                        mount_pos = 0;
-	uint32_t                             is_yuv;
 
 	/* Validate input parameters */
 	if (!setting) {
@@ -789,7 +712,6 @@ int32_t msm_sensor_driver_probe(void *setting,
 			setting32.is_init_params_valid;
 		slave_info->sensor_init_params = setting32.sensor_init_params;
 		slave_info->is_flash_supported = setting32.is_flash_supported;
-		slave_info->output_format = setting32.output_format;
 	} else
 #endif
 	{
@@ -802,10 +724,10 @@ int32_t msm_sensor_driver_probe(void *setting,
 	}
 
 	/* Print slave info */
-	pr_err("camera id %d", slave_info->camera_id);
-	pr_err("slave_addr 0x%x", slave_info->slave_addr);
-	pr_err("addr_type %d", slave_info->addr_type);
-	pr_err("sensor_id_reg_addr 0x%x",
+	CDBG("camera id %d", slave_info->camera_id);
+	CDBG("slave_addr 0x%x", slave_info->slave_addr);
+	CDBG("addr_type %d", slave_info->addr_type);
+	CDBG("sensor_id_reg_addr 0x%x",
 		slave_info->sensor_id_info.sensor_id_reg_addr);
 	CDBG("sensor_id 0x%x", slave_info->sensor_id_info.sensor_id);
 	CDBG("size %d", slave_info->power_setting_array.size);
@@ -893,14 +815,6 @@ int32_t msm_sensor_driver_probe(void *setting,
 		slave_info->sensor_id_info.sensor_id_reg_addr;
 	camera_info->sensor_id = slave_info->sensor_id_info.sensor_id;
 
-/*
-  * add dual i2c address support for camera sensor probe
-  *
-  * by ZTE_YCM_20140909 yi.changming 000054
-  */
-// --->
-	camera_info->sensor_bakeup_slave_addr = slave_info->bakeup_slave_addr;
-// <---000054
 	/* Fill CCI master, slave address and CCI default params */
 	if (!s_ctrl->sensor_i2c_client) {
 		pr_err("failed: sensor_i2c_client %p",
@@ -955,18 +869,6 @@ int32_t msm_sensor_driver_probe(void *setting,
 	s_ctrl->sensordata->eeprom_name = slave_info->eeprom_name;
 	s_ctrl->sensordata->actuator_name = slave_info->actuator_name;
 	s_ctrl->sensordata->ois_name = slave_info->ois_name;
-
-/*
-  * camera sensor module compatile
-  * 
-  * by ZTE_YCM_20140728 yi.changming 000028
-  */
-// --->
-	s_ctrl->sensordata->sensor_module_name = NULL;
-	s_ctrl->sensordata->chromtix_lib_name = NULL;
-	s_ctrl->sensordata->default_chromtix_lib_name = NULL;
-// <---
-
 	/*
 	 * Update eeporm subdevice Id by input eeprom name
 	 */
@@ -1044,23 +946,15 @@ int32_t msm_sensor_driver_probe(void *setting,
 		goto free_camera_info;
 	}
 	/* Update sensor mount angle and position in media entity flag */
-	is_yuv = (slave_info->output_format == MSM_SENSOR_YCBCR) ? 1 : 0;
-	mount_pos = is_yuv << 25 |
-		(s_ctrl->sensordata->sensor_info->position << 16) |
-		((s_ctrl->sensordata->
-		sensor_info->sensor_mount_angle / 90) << 8);
-
+	mount_pos = s_ctrl->sensordata->sensor_info->position << 16;
+	mount_pos = mount_pos | ((s_ctrl->sensordata->sensor_info->
+		sensor_mount_angle / 90) << 8);
 	s_ctrl->msm_sd.sd.entity.flags = mount_pos | MEDIA_ENT_FL_DEFAULT;
 
 	/*Save sensor info*/
 	s_ctrl->sensordata->cam_slave_info = slave_info;
 
 	msm_sensor_fill_sensor_info(s_ctrl, probed_info, entity_name);
-
-	if(msm_sensor_enable_debugfs(s_ctrl))
-		CDBG("%s:%d creat debugfs fail\n", __func__, __LINE__);
-
-	msm_sensor_register_sysdev(s_ctrl);
 
 	return rc;
 
@@ -1470,7 +1364,7 @@ static int __init msm_sensor_driver_init(void)
 {
 	int32_t rc = 0;
 
-	pr_err("Enter");
+	CDBG("Enter");
 	rc = platform_driver_probe(&msm_sensor_platform_driver,
 		msm_sensor_driver_platform_probe);
 	if (!rc) {

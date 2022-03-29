@@ -207,6 +207,19 @@ const int cpu_is_krait(void);
 const int cpu_is_krait_v1(void);
 const int cpu_is_krait_v2(void);
 const int cpu_is_krait_v3(void);
+/*
+ * Support for FTM & RECOVERY mode by ZTE_BOOT_JIA_20130107, jia.jia
+ */
+#ifdef CONFIG_ZTE_BOOT_MODE
+void socinfo_set_ftm_flag(int val);
+int socinfo_get_ftm_flag(void);
+int socinfo_get_check_flag(void);
+
+void socinfo_set_recovery_flag(int val);
+int socinfo_get_recovery_flag(void);
+#endif
+
+void socinfo_set_hw_ver(char *ver);
 
 static inline int cpu_is_msm7x01(void)
 {

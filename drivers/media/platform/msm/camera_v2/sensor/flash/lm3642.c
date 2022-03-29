@@ -15,7 +15,7 @@
 #include "msm_camera_io_util.h"
 #include "msm_led_flash.h"
 
-#define FLASH_NAME "qcom,led-lm3642" //used on msm8909 by zte
+#define FLASH_NAME "ti,lm3642"
 
 #define CONFIG_MSMB_CAMERA_DEBUG
 #ifdef CONFIG_MSMB_CAMERA_DEBUG
@@ -28,40 +28,31 @@
 static struct msm_led_flash_ctrl_t fctrl;
 static struct i2c_driver lm3642_i2c_driver;
 
-static struct msm_camera_i2c_reg_array lm3642_init_array[] = {	
-	{ 0x0A, 0x00 },// standby mode
-	{ 0x08, 0x07 },
-	{ 0x09, 0x19 },
-	{ 0x01, 0x00 }, // disable UVLO function
+static struct msm_camera_i2c_reg_array lm3642_init_array[] = {
+	{0x0A, 0x00},
+	{0x08, 0x07},
+	{0x09, 0x19},
 };
 
 static struct msm_camera_i2c_reg_array lm3642_off_array[] = {
-	{ 0x0A, 0x00 },
-	{ 0x01, 0x00 }, //disable UVLO function
+	{0x0A, 0x00},
 };
 
 static struct msm_camera_i2c_reg_array lm3642_release_array[] = {
-	{ 0x0A, 0x00 }, // standby mode
-	{ 0x01, 0x00 }, // disable UVLO function
+	{0x0A, 0x00},
 };
 
 static struct msm_camera_i2c_reg_array lm3642_low_array[] = {
-	{ 0x06, 0x00 }, // 
-	{ 0x09, 0x28 }, // current control torch=140.63mA
-	{ 0x0A, 0x02 }, // torch mode
-	{ 0x01, 0x00 }, // disable UVLO function
+	{0x0A, 0x22},
 };
 
 static struct msm_camera_i2c_reg_array lm3642_high_array[] = {
-	{ 0x08, 0x57 }, // IVM-D threshold voltage=3.4v default=0x52
-	{ 0x09, 0x29 }, // current control 0x28->843.75mA 0x29>937.5mA
-	{ 0x0A, 0xA3 }, // flash mode
-	{ 0x01, 0x00 }, // disable UVLO function
+	{0x0A, 0x23},
 };
 
 
 static const struct of_device_id lm3642_i2c_trigger_dt_match[] = {
-	{.compatible = "qcom,led-lm3642"},
+	{.compatible = "ti,lm3642"},
 	{}
 };
 
@@ -125,7 +116,7 @@ int msm_flash_lm3642_led_init(struct msm_led_flash_ctrl_t *fctrl)
 		if (rc < 0)
 			pr_err("%s:%d failed\n", __func__, __LINE__);
 	}
-	return 0;
+	return rc;
 }
 
 int msm_flash_lm3642_led_release(struct msm_led_flash_ctrl_t *fctrl)
@@ -305,20 +296,6 @@ static int msm_flash_lm3642_i2c_remove(struct i2c_client *client)
 	}
 	return rc;
 }
-/*
-  * Added close the led-flash when powerdown
-  *
-  * by ZTE_YCM_20140421 yi.changming
-  */
-// --->
-static void zte_flash_shutdown(struct i2c_client *client)
-{
-	pr_err("%s: E\n", __func__);
-
-	fctrl.func_tbl->flash_led_off(&fctrl);
-
-}
-// <---
 
 
 static struct i2c_driver lm3642_i2c_driver = {
@@ -330,14 +307,6 @@ static struct i2c_driver lm3642_i2c_driver = {
 		.owner = THIS_MODULE,
 		.of_match_table = lm3642_i2c_trigger_dt_match,
 	},
-/*
-  * Added close the led-flash when powerdown
-  *
-  * by ZTE_YCM_20140421 yi.changming
-  */
-// --->
-	.shutdown = zte_flash_shutdown,
-// <---
 };
 
 static int __init msm_flash_lm3642_init(void)

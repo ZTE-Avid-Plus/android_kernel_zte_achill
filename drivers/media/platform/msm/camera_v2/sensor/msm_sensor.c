@@ -18,7 +18,6 @@
 #include <linux/regulator/rpm-smd-regulator.h>
 #include <linux/regulator/consumer.h>
 
-#include "zte_camera_sensor_util.h"
 #undef CDBG
 #define CDBG(fmt, args...) pr_debug(fmt, ##args)
 
@@ -138,7 +137,7 @@ static int32_t msm_sensor_get_dt_data(struct device_node *of_node,
 
 	rc = of_property_read_string(of_node, "qcom,sensor-name",
 		&sensordata->sensor_name);
-	pr_err("%s qcom,sensor-name %s, rc %d\n", __func__,
+	CDBG("%s qcom,sensor-name %s, rc %d\n", __func__,
 		sensordata->sensor_name, rc);
 	if (rc < 0) {
 		pr_err("%s failed %d\n", __func__, __LINE__);
@@ -303,14 +302,6 @@ static int32_t msm_sensor_get_dt_data(struct device_node *of_node,
 		sensordata->slave_info->sensor_slave_addr,
 		sensordata->slave_info->sensor_id_reg_addr,
 		sensordata->slave_info->sensor_id);
-/*
-  * add dual i2c address support for camera sensor probe
-  *
-  * by ZTE_YCM_20140909 yi.changming 000054
-  */
-// --->
-	sensordata->slave_info->sensor_bakeup_slave_addr = 0;
-// --->000054
 
 	/*Optional property, don't return error if absent */
 	ret = of_property_read_string(of_node, "qcom,vdd-cx-name",
@@ -418,30 +409,6 @@ static struct msm_cam_clk_info cam_8974_clk_info[] = {
 	[SENSOR_CAM_MCLK] = {"cam_src_clk", 24000000},
 	[SENSOR_CAM_CLK] = {"cam_clk", 0},
 };
-/*
-  * add dual i2c address support for camera sensor probe
-  *
-  * by ZTE_YCM_20140909 yi.changming 000054
-  */
-// --->
-void camera_sensor_address_swap(struct msm_sensor_ctrl_t *s_ctrl)
-{
-
-	uint16_t temp;
-	
-	temp = s_ctrl->sensordata->slave_info->sensor_slave_addr;
-	
-   	s_ctrl->sensordata->slave_info->sensor_slave_addr
-		= s_ctrl->sensordata->slave_info->sensor_bakeup_slave_addr;
-	pr_err("%s:sensor_bakeup_slave_addr=0x%x \n",__func__,s_ctrl->sensordata->slave_info->sensor_bakeup_slave_addr);
-	 s_ctrl->sensordata->slave_info->sensor_bakeup_slave_addr = temp;
-	s_ctrl->sensor_i2c_client->client->addr =
-				s_ctrl->sensordata->slave_info->sensor_slave_addr;
-	pr_err("%s:s_ctrl->sensor_i2c_client->client->addr=0x%x \n",__func__,s_ctrl->sensor_i2c_client->client->addr);
-
-	return;
-}
-// --->000054
 
 int msm_sensor_power_down(struct msm_sensor_ctrl_t *s_ctrl)
 {
@@ -506,33 +473,10 @@ int msm_sensor_power_up(struct msm_sensor_ctrl_t *s_ctrl)
 			return rc;
 		rc = msm_sensor_check_id(s_ctrl);
 		if (rc < 0) {
-/*
-  * add dual i2c address support for camera sensor probe
-  *
-  * by ZTE_YCM_20140909 yi.changming 000054
-  */
-// --->
-#if 0
 			msm_camera_power_down(power_info,
 				s_ctrl->sensor_device_type, sensor_i2c_client);
 			msleep(20);
 			continue;
-#else
-			if(s_ctrl->sensordata->slave_info->sensor_bakeup_slave_addr){
-				pr_err("wxl sensor_bakeup_slave_addr is not null");
-				camera_sensor_address_swap(s_ctrl);
-				rc = msm_sensor_check_id(s_ctrl);
-			}
-			if (rc < 0) {
-				msm_camera_power_down(power_info,
-				s_ctrl->sensor_device_type, sensor_i2c_client);
-				msleep(20);
-				continue;
-			}else{
-				break;
-			}
-#endif
-// --->000054
 		} else {
 			break;
 		}
@@ -564,8 +508,7 @@ int msm_sensor_match_id(struct msm_sensor_ctrl_t *s_ctrl)
 			sensor_name);
 		return -EINVAL;
 	}
-        pr_err("%s:slave_info->sensor_id_reg_addr=0x%x \n",__func__,slave_info->sensor_id_reg_addr);
-        pr_err("%s:sensor_i2c_client->client->addr=0x%x \n",__func__,sensor_i2c_client->client->addr);
+
 	rc = sensor_i2c_client->i2c_func_tbl->i2c_read(
 		sensor_i2c_client, slave_info->sensor_id_reg_addr,
 		&chipid, MSM_CAMERA_I2C_WORD_DATA);
@@ -574,7 +517,7 @@ int msm_sensor_match_id(struct msm_sensor_ctrl_t *s_ctrl)
 		return rc;
 	}
 
-	pr_err("%s: read id: 0x%x expected id 0x%x:\n", __func__, chipid,
+	CDBG("%s: read id: 0x%x expected id 0x%x:\n", __func__, chipid,
 		slave_info->sensor_id);
 	if (chipid != slave_info->sensor_id) {
 		pr_err("msm_sensor_match_id chip id doesnot match\n");
@@ -706,29 +649,7 @@ static int msm_sensor_config32(struct msm_sensor_ctrl_t *s_ctrl,
 		CDBG("%s:%d mount angle valid %d value %d\n", __func__,
 			__LINE__, cdata->cfg.sensor_info.is_mount_angle_valid,
 			cdata->cfg.sensor_info.sensor_mount_angle);
-/*
-  * camera sensor module compatile
-  * 
-  * by ZTE_YCM_20140728 yi.changming 000028
-  */
-// --->	
-		if(s_ctrl->sensordata->chromtix_lib_name){
-			memcpy(cdata->cfg.sensor_info.chromtix_lib_name,
-				s_ctrl->sensordata->chromtix_lib_name,
-				sizeof(cdata->cfg.sensor_info.chromtix_lib_name));
-					printk("%s:%d chromtix_lib_name %s\n", __func__, __LINE__,
-			cdata->cfg.sensor_info.chromtix_lib_name);
-		}
-		if(s_ctrl->sensordata->default_chromtix_lib_name){
-			memcpy(cdata->cfg.sensor_info.default_chromtix_lib_name,
-				s_ctrl->sensordata->default_chromtix_lib_name,
-				sizeof(cdata->cfg.sensor_info.default_chromtix_lib_name));
-					printk("%s:%d sensor name %s\n", __func__, __LINE__,
-			cdata->cfg.sensor_info.sensor_name);
-					printk("%s:%d default_chromtix_lib_name %s\n", __func__, __LINE__,
-			cdata->cfg.sensor_info.default_chromtix_lib_name);
-		}
-// <---
+
 		break;
 	case CFG_GET_SENSOR_INIT_PARAMS:
 		cdata->cfg.sensor_init_params.modes_supported =
@@ -1059,29 +980,7 @@ int msm_sensor_config(struct msm_sensor_ctrl_t *s_ctrl, void __user *argp)
 		CDBG("%s:%d mount angle valid %d value %d\n", __func__,
 			__LINE__, cdata->cfg.sensor_info.is_mount_angle_valid,
 			cdata->cfg.sensor_info.sensor_mount_angle);
-/*
-  * camera sensor module compatile
-  * 
-  * by ZTE_YCM_20140728 yi.changming 000028
-  */
-// --->	
-		if(s_ctrl->sensordata->chromtix_lib_name){
-			memcpy(cdata->cfg.sensor_info.chromtix_lib_name,
-				s_ctrl->sensordata->chromtix_lib_name,
-				sizeof(cdata->cfg.sensor_info.chromtix_lib_name));
-					printk("%s:%d chromtix_lib_name %s\n", __func__, __LINE__,
-			cdata->cfg.sensor_info.chromtix_lib_name);
-		}
-		if(s_ctrl->sensordata->default_chromtix_lib_name){
-			memcpy(cdata->cfg.sensor_info.default_chromtix_lib_name,
-				s_ctrl->sensordata->default_chromtix_lib_name,
-				sizeof(cdata->cfg.sensor_info.default_chromtix_lib_name));
-					printk("%s:%d sensor name %s\n", __func__, __LINE__,
-			cdata->cfg.sensor_info.sensor_name);
-					printk("%s:%d default_chromtix_lib_name %s\n", __func__, __LINE__,
-			cdata->cfg.sensor_info.default_chromtix_lib_name);
-		}
-// <---
+
 		break;
 	case CFG_GET_SENSOR_INIT_PARAMS:
 		cdata->cfg.sensor_init_params.modes_supported =
@@ -1520,8 +1419,8 @@ int32_t msm_sensor_platform_probe(struct platform_device *pdev,
 	uint32_t session_id;
 	unsigned long mount_pos = 0;
 	s_ctrl->pdev = pdev;
-	pr_err("%s called data %p\n", __func__, data);
-	pr_err("%s pdev name %s\n", __func__, pdev->id_entry->name);
+	CDBG("%s called data %p\n", __func__, data);
+	CDBG("%s pdev name %s\n", __func__, pdev->id_entry->name);
 	if (pdev->dev.of_node) {
 		rc = msm_sensor_get_dt_data(pdev->dev.of_node, s_ctrl);
 		if (rc < 0) {
@@ -1572,7 +1471,7 @@ int32_t msm_sensor_platform_probe(struct platform_device *pdev,
 		return rc;
 	}
 
-	pr_err("%s %s probe succeeded\n", __func__,
+	pr_info("%s %s probe succeeded\n", __func__,
 		s_ctrl->sensordata->sensor_name);
 	v4l2_subdev_init(&s_ctrl->msm_sd.sd,
 		s_ctrl->sensor_v4l2_subdev_ops);
@@ -1605,13 +1504,10 @@ int32_t msm_sensor_platform_probe(struct platform_device *pdev,
 	s_ctrl->msm_sd.sd.devnode->fops =
 		&msm_sensor_v4l2_subdev_fops;
 
-	pr_err("%s:%d\n", __func__, __LINE__);
+	CDBG("%s:%d\n", __func__, __LINE__);
 
 	s_ctrl->func_tbl->sensor_power_down(s_ctrl);
-	pr_err("%s:%d\n", __func__, __LINE__);
-	if(msm_sensor_enable_debugfs(s_ctrl))
-		CDBG("%s:%d creat debugfs fail\n", __func__, __LINE__);
-	msm_sensor_register_sysdev(s_ctrl);
+	CDBG("%s:%d\n", __func__, __LINE__);
 	return rc;
 }
 
@@ -1732,11 +1628,6 @@ int msm_sensor_i2c_probe(struct i2c_client *client,
 	CDBG("%s:%d\n", __func__, __LINE__);
 
 	s_ctrl->func_tbl->sensor_power_down(s_ctrl);
-
-	if(msm_sensor_enable_debugfs(s_ctrl))
-		CDBG("%s:%d creat debugfs fail\n", __func__, __LINE__);
-	msm_sensor_register_sysdev(s_ctrl);
-
 	return rc;
 }
 
