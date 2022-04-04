@@ -1,7 +1,6 @@
 #
 # Makefile for building the SELinux module as part of the kernel tree.
 #
-EXTRA_CFLAGS += -DCONFIG_ALWAYS_ENFORCE=false
 
 obj-$(CONFIG_SECURITY_SELINUX) := selinux.o
 

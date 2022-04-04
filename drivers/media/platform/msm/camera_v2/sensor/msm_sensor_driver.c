@@ -1,4 +1,4 @@
-/* Copyright (c) 2013-2015,2017 The Linux Foundation. All rights reserved.
+/* Copyright (c) 2013-2015, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -17,7 +17,22 @@
 #include "camera.h"
 #include "msm_cci.h"
 #include "msm_camera_dt_util.h"
-
+/*
+  * use  camera sensor engineering mode  interface
+  * use  test camera sensor mipi clock interface
+  * by ZTE_YCM_20140710 yi.changming 000006
+  */
+// --->
+#include "zte_camera_sensor_util.h"
+ // <---
+ /*
+  * camera sensor module compatile
+  * 
+  * by ZTE_YCM_20140728 yi.changming 000028
+  */
+// --->
+ #include "../eeprom/msm_eeprom.h"
+  // <---
 /* Logging macro */
 #undef CDBG
 #define CDBG(fmt, args...) pr_debug(fmt, ##args)
@@ -103,11 +118,7 @@ static int32_t msm_sensor_driver_create_i2c_v4l_subdev
 	s_ctrl->msm_sd.sd.entity.name =	s_ctrl->msm_sd.sd.name;
 	s_ctrl->sensordata->sensor_info->session_id = session_id;
 	s_ctrl->msm_sd.close_seq = MSM_SD_CLOSE_2ND_CATEGORY | 0x3;
-	rc = msm_sd_register(&s_ctrl->msm_sd);
-	if (rc < 0) {
-		pr_err("failed: msm_sd_register rc %d", rc);
-		return rc;
-	}
+	msm_sd_register(&s_ctrl->msm_sd);
 	CDBG("%s:%d\n", __func__, __LINE__);
 	return rc;
 }
@@ -137,11 +148,7 @@ static int32_t msm_sensor_driver_create_v4l_subdev
 	s_ctrl->msm_sd.sd.entity.group_id = MSM_CAMERA_SUBDEV_SENSOR;
 	s_ctrl->msm_sd.sd.entity.name = s_ctrl->msm_sd.sd.name;
 	s_ctrl->msm_sd.close_seq = MSM_SD_CLOSE_2ND_CATEGORY | 0x3;
-	rc = msm_sd_register(&s_ctrl->msm_sd);
-	if (rc < 0) {
-		pr_err("failed: msm_sd_register rc %d", rc);
-		return rc;
-	}
+	msm_sd_register(&s_ctrl->msm_sd);
 	msm_sensor_v4l2_subdev_fops = v4l2_subdev_fops;
 #ifdef CONFIG_COMPAT
 	msm_sensor_v4l2_subdev_fops.compat_ioctl32 =
@@ -152,6 +159,60 @@ static int32_t msm_sensor_driver_create_v4l_subdev
 
 	return rc;
 }
+/*
+  * camera sensor module compatile
+  * 
+  * by ZTE_YCM_20140728 yi.changming 000028
+  */
+// --->	
+static int32_t msm_get_info_from_eeprom(
+		struct msm_sensor_ctrl_t *s_ctrl,struct device_node *eeprom_node)
+{
+	struct platform_device *eeprom_device = NULL;
+	struct v4l2_subdev *sd = NULL;
+	struct msm_eeprom_ctrl_t *e_ctrl = NULL;
+
+	if (!eeprom_node) {
+		pr_err("%s: can't find eeprom sensor phandle\n", __func__);
+		return -1;
+	}
+	
+	eeprom_device = of_find_device_by_node(eeprom_node);
+	if (!eeprom_device) {
+			pr_err("%s:%d: can't find the device by node\n", __func__,__LINE__);
+			return -1;
+	}
+		
+	sd = platform_get_drvdata(eeprom_device);
+	if(!sd){
+		pr_err("%s:%d: can't find the eeprom sd\n", __func__,__LINE__);
+		return -1;
+	}
+
+	e_ctrl = v4l2_get_subdevdata(sd);
+
+	if(!e_ctrl){
+		pr_err("%s:%d: can't find the eeprom sd\n", __func__,__LINE__);
+		return -1;
+	}
+
+	s_ctrl->sensordata->sensor_module_name = e_ctrl->sensor_module_name;
+	s_ctrl->sensordata->chromtix_lib_name= e_ctrl->chromtix_lib_name;
+	s_ctrl->sensordata->default_chromtix_lib_name= e_ctrl->default_chromtix_lib_name;
+
+	if(e_ctrl->sensor_module_name)
+		pr_err("%s:%d: sensor_module_name:%s\n", __func__,__LINE__,e_ctrl->sensor_module_name);
+	
+	if(e_ctrl->chromtix_lib_name)
+		pr_err("%s:%d:chromtix_lib_name: %s\n", __func__,__LINE__,e_ctrl->chromtix_lib_name);
+	
+	if(e_ctrl->default_chromtix_lib_name)
+		pr_err("%s:%d:default_chromtix_lib_name: %s\n", __func__,__LINE__,e_ctrl->default_chromtix_lib_name);
+
+	return 0;
+	
+}
+// <---	
 
 static int32_t msm_sensor_fill_eeprom_subdevid_by_name(
 				struct msm_sensor_ctrl_t *s_ctrl)
@@ -217,7 +278,14 @@ static int32_t msm_sensor_fill_eeprom_subdevid_by_name(
 			of_node_put(src_node);
 			continue;
 		}
-
+/*
+  * camera sensor module compatile
+  * 
+  * by ZTE_YCM_20140728 yi.changming 000028
+  */
+// --->		
+		msm_get_info_from_eeprom(s_ctrl,src_node);
+// <---		
 		*eeprom_subdev_id = val;
 		CDBG("Done. Eeprom subdevice id is %d\n", val);
 		of_node_put(src_node);
@@ -415,11 +483,17 @@ static int32_t msm_sensor_create_pd_settings(void *setting,
 
 #ifdef CONFIG_COMPAT
 	if (is_compat_task()) {
-		rc = msm_sensor_get_pw_settings_compat(
-			pd, pu, size_down);
-		if (rc < 0) {
-			pr_err("failed");
-			return -EFAULT;
+		int i = 0;
+		struct msm_sensor_power_setting32 *power_setting_iter =
+		(struct msm_sensor_power_setting32 *)compat_ptr((
+		(struct msm_camera_sensor_slave_info32 *)setting)->
+		power_setting_array.power_setting);
+
+		for (i = 0; i < size_down; i++) {
+			pd[i].config_val = power_setting_iter[i].config_val;
+			pd[i].delay = power_setting_iter[i].delay;
+			pd[i].seq_type = power_setting_iter[i].seq_type;
+			pd[i].seq_val = power_setting_iter[i].seq_val;
 		}
 	} else
 #endif
@@ -728,10 +802,10 @@ int32_t msm_sensor_driver_probe(void *setting,
 	}
 
 	/* Print slave info */
-	CDBG("camera id %d", slave_info->camera_id);
-	CDBG("slave_addr 0x%x", slave_info->slave_addr);
-	CDBG("addr_type %d", slave_info->addr_type);
-	CDBG("sensor_id_reg_addr 0x%x",
+	pr_err("camera id %d", slave_info->camera_id);
+	pr_err("slave_addr 0x%x", slave_info->slave_addr);
+	pr_err("addr_type %d", slave_info->addr_type);
+	pr_err("sensor_id_reg_addr 0x%x",
 		slave_info->sensor_id_info.sensor_id_reg_addr);
 	CDBG("sensor_id 0x%x", slave_info->sensor_id_info.sensor_id);
 	CDBG("size %d", slave_info->power_setting_array.size);
@@ -819,6 +893,14 @@ int32_t msm_sensor_driver_probe(void *setting,
 		slave_info->sensor_id_info.sensor_id_reg_addr;
 	camera_info->sensor_id = slave_info->sensor_id_info.sensor_id;
 
+/*
+  * add dual i2c address support for camera sensor probe
+  *
+  * by ZTE_YCM_20140909 yi.changming 000054
+  */
+// --->
+	camera_info->sensor_bakeup_slave_addr = slave_info->bakeup_slave_addr;
+// <---000054
 	/* Fill CCI master, slave address and CCI default params */
 	if (!s_ctrl->sensor_i2c_client) {
 		pr_err("failed: sensor_i2c_client %p",
@@ -873,6 +955,18 @@ int32_t msm_sensor_driver_probe(void *setting,
 	s_ctrl->sensordata->eeprom_name = slave_info->eeprom_name;
 	s_ctrl->sensordata->actuator_name = slave_info->actuator_name;
 	s_ctrl->sensordata->ois_name = slave_info->ois_name;
+
+/*
+  * camera sensor module compatile
+  * 
+  * by ZTE_YCM_20140728 yi.changming 000028
+  */
+// --->
+	s_ctrl->sensordata->sensor_module_name = NULL;
+	s_ctrl->sensordata->chromtix_lib_name = NULL;
+	s_ctrl->sensordata->default_chromtix_lib_name = NULL;
+// <---
+
 	/*
 	 * Update eeporm subdevice Id by input eeprom name
 	 */
@@ -904,6 +998,12 @@ int32_t msm_sensor_driver_probe(void *setting,
 	}
 
 	pr_err("%s probe succeeded", slave_info->sensor_name);
+
+	/*
+	  Set probe succeeded flag to 1 so that no other camera shall
+	 * probed on this slot
+	 */
+	s_ctrl->is_probe_succeed = 1;
 
 	/*
 	 * Update the subdevice id of flash-src based on availability in kernel.
@@ -957,11 +1057,11 @@ int32_t msm_sensor_driver_probe(void *setting,
 
 	msm_sensor_fill_sensor_info(s_ctrl, probed_info, entity_name);
 
-	/*
-	 * Set probe succeeded flag to 1 so that no other camera shall
-	 * probed on this slot
-	 */
-	s_ctrl->is_probe_succeed = 1;
+	if(msm_sensor_enable_debugfs(s_ctrl))
+		CDBG("%s:%d creat debugfs fail\n", __func__, __LINE__);
+
+	msm_sensor_register_sysdev(s_ctrl);
+
 	return rc;
 
 camera_power_down:
@@ -1370,7 +1470,7 @@ static int __init msm_sensor_driver_init(void)
 {
 	int32_t rc = 0;
 
-	CDBG("Enter");
+	pr_err("Enter");
 	rc = platform_driver_probe(&msm_sensor_platform_driver,
 		msm_sensor_driver_platform_probe);
 	if (!rc) {
